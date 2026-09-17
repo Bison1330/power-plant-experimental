@@ -1,0 +1,13 @@
+# Cargo
+**/target/
+**/*.rs.bk
+
+**/node_modules/
+
+.DS_Store
+.idea/
+.vscode/
+
+.env
+.envrc
+.direnv/

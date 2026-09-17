@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = [
+	# "pallets/launchpad",
+	# "pallets/vitreus-dex",
+]
+
+[workspace.package]
+authors = ["Vitreus Foundation"]
+edition = "2021"
+license = "GPL-3.0-only"
+repository = "https://github.com/Vitreus-Foundation/power-plant-experimental"
+version = "0.1.0"
+
+# Align FRAME / polkadot-sdk revisions with power-plant when adding crates.
+# [workspace.dependencies]
