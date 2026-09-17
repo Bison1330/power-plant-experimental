@@ -1,0 +1,49 @@
+# Every commit a consumer might pin is built and tested here the way the
+# consumer will build it: --locked against the committed Cargo.lock, which
+# resolves polkadot-sdk to the same commit as power-plant's.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    name: build, test, benchmarks, format, clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev libssl-dev
+
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Benchmarks compile
+        run: cargo check --workspace --locked --features runtime-benchmarks
+
+      - name: try-runtime compiles
+        run: cargo check --workspace --locked --features try-runtime
+
+      # rustfmt.toml is power-plant's; the pinned toolchain's rustfmt and
+      # power-plant's nightly check agree on every file here.
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --locked --all-targets -- --deny warnings

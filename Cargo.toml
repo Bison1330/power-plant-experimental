@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-	# "pallets/launchpad",
-	# "pallets/vitreus-dex",
+	"pallets/vitreus-dex",
+	"pallets/launchpad",
 ]
 
 [workspace.package]
@@ -12,5 +12,40 @@ license = "GPL-3.0-only"
 repository = "https://github.com/Vitreus-Foundation/power-plant-experimental"
 version = "0.1.0"
 
-# Align FRAME / polkadot-sdk revisions with power-plant when adding crates.
-# [workspace.dependencies]
+# Every polkadot-sdk entry names the source exactly as power-plant's
+# Cargo.toml does (same URL, same `branch`), and Cargo.lock resolves it to
+# the same commit. Cargo unifies a git dependency across a consumer and this
+# workspace only when the source strings match; a `rev` or `tag` here
+# against a `branch` there would give power-plant two `frame-support`s.
+[workspace.dependencies]
+log = { version = "0.4", default-features = false }
+parity-scale-codec = { version = "3.6.12", default-features = false, features = [
+	"derive",
+] }
+scale-info = { version = "2.3", default-features = false, features = [
+	"derive",
+	"serde",
+] }
+impl-trait-for-tuples = "0.2"
+primitive-types = { version = "0.12.2", default-features = false }
+
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-api = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+sp-std = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+pallet-assets = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+pallet-multisig = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+pallet-proxy = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+pallet-utility = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407", default-features = false }
+
+pallet-vitreus-dex = { path = "pallets/vitreus-dex", default-features = false }
+pallet-launchpad = { path = "pallets/launchpad", default-features = false }
+
+[profile.release]
+panic = "unwind"
