@@ -1,0 +1,15 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d78b85b2e76fe40336a584dcad9e0c9d3d20174567d92bc8e69247e654220a1e # shrinks to ops = [1 LNRG-wei of staking rewards arrive]
+cc 93bb9235ff82b79a1481e34ac2b4fb1f925f6b664f60363fba45d6ab4cac6d13 # shrinks to ops = [alice creates a launch (initial buy 999999999999 wei)]
+cc a6660f488eb6f64ebe1fd0ae163ee04124590d1ce7b56d6f7f6d73b5d88a673a # shrinks to ops = [2101 LNRG-wei of staking rewards arrive, alice creates a launch (initial buy 0 wei), alice buys 3031.0000000000005 VTRS of launch[0], stake(launch[0]), 10 blocks pass, alice compounds launch[0]]
+cc 216ef33bb486540c045af8da5221a55daf5bc3ee85667d52ecf6bd4b77e61774 # shrinks to ops = [bob creates a launch (initial buy 9000 VTRS), bob adds 10000000000000000 VTRS of liquidity to launch[0]'s pool]
+cc 3f5c74dc0cb09f37bd690176604407b3cb8378d56455643e587a4942a961c4d8 # shrinks to ops = [alice creates a launch (initial buy 0 wei), the broker gains 10000000000000000 VTRS, alice creates a launch (initial buy 0 wei), alice buys 1000000000 wei of launch[0]]
+cc dc394f1099b3897dcc736e93e05cc121b2e0ee5a1b37361bf6334a3daa0f816e # shrinks to ops = [alice creates a launch (initial buy 3040 VTRS), keeper buys with 1 VTRS in launch[0]'s pool]
+cc 9ea4c126f8ba5db5a941f6010e75079a03e9649de3e9d42fbab0eb317a74e0fe # shrinks to ops = [alice creates a launch (initial buy 3031.0000000000005 VTRS), keeper buys with 1 VTRS in launch[0]'s pool]
+cc 9074ce35034a5bd87d843f117bbe709d3f0fae01dd60ee595456d18631f7d553 # shrinks to ops = [alice creates a launch (initial buy 0 wei), alice creates a launch (initial buy 0 wei), alice creates a launch (initial buy 0 wei), alice buys 9000 VTRS of launch[3], alice buys with 774000 VTRS in launch[0]'s pool, bob buys with 1 wei in launch[3]'s pool]
+cc 3604c9ffd17543ab57d35af981bd75b465779d99c6ce4d47dac7dd37c1a4667c # shrinks to ops = [alice creates a launch (initial buy 0 wei), alice buys 3040 VTRS of launch[0], 10 blocks pass, 8 LNRG-wei of staking rewards arrive, stake(launch[0]), alice buys with 1900000 VTRS in launch[0]'s pool, alice compounds launch[0]]

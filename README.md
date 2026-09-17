@@ -18,7 +18,9 @@ Cargo.lock                       # resolves polkadot-sdk to the same commit as p
 pallets/vitreus-dex/             # constant-product AMM, LP positions, per-pool fee routing, solver marketplace
 pallets/vitreus-dex/SECURITY_AUDIT.md
 pallets/launchpad/               # bonding-curve token launches graduating into a locked DEX pool
+pallets/launch-treasury/         # a slice of every launch-token trade, staked as one cooperator; yield burns the token
 pallets/LAUNCHPAD_SPEC.md        # the launchpad's design, invariants and failure modes
+pallets/LAUNCH_TREASURY_SPEC.md  # the treasury's — and §10.12, where pallet code lives and how consumers pin it
 pallets/REVIEW_2026-09-17.md     # adversarial review of the pallets, with the red tests it produced
 .github/workflows/ci.yml         # build, test, benchmarks, try-runtime, fmt, clippy — on every commit
 # optional later: thin --dev node / runtime, scripts
@@ -36,7 +38,13 @@ Pin a commit (or a tag once one is cut), never a branch:
 ```toml
 pallet-vitreus-dex = { git = "https://github.com/Vitreus-Foundation/power-plant-experimental", rev = "<sha>", default-features = false }
 pallet-launchpad   = { git = "https://github.com/Vitreus-Foundation/power-plant-experimental", rev = "<sha>", default-features = false }
+pallet-launch-treasury = { git = "https://github.com/Vitreus-Foundation/power-plant-experimental", rev = "<sha>", default-features = false }
 ```
+
+The treasury reaches the runtime's staking and energy broker through two pallet-local traits,
+`TreasuryStaking` and `TreasuryExchange`; the consumer implements each with a small adapter over its
+own pallets (power-plant's are `EnergyGenerationStaking` and `EnergyBrokerExchange` in its runtime).
+No crate here depends on a runtime trait crate.
 
 Wire crates into the testnet runtime only (`testnet-runtime` / equivalent). A fix to a pallet
 is a commit here and a pin bump in the consumer; nothing is patched in a consumer.
@@ -56,6 +64,7 @@ its lock, move this one to the same commit.
 cargo test --workspace --locked
 cargo check --workspace --locked --features runtime-benchmarks
 cargo fmt --all -- --check
+PROPTEST_CASES=5000 cargo test --release -p pallet-launch-treasury --lib fuzz   # the property harness; 32 cases in plain `cargo test`
 ```
 
 CI (`.github/workflows/ci.yml`) runs those plus a `try-runtime` feature check and clippy with warnings

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
 	"pallets/vitreus-dex",
 	"pallets/launchpad",
+	"pallets/launch-treasury",
 ]
 
 [workspace.package]
@@ -46,6 +47,7 @@ pallet-utility = { git = "https://github.com/paritytech/polkadot-sdk", branch = 
 
 pallet-vitreus-dex = { path = "pallets/vitreus-dex", default-features = false }
 pallet-launchpad = { path = "pallets/launchpad", default-features = false }
+pallet-launch-treasury = { path = "pallets/launch-treasury", default-features = false }
 
 [profile.release]
 panic = "unwind"
