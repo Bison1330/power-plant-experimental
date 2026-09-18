@@ -630,3 +630,31 @@ Every figure below is state this pallet already holds or would hold under §12.2
 - `WindowBlocks`: 7 days smooths a pad with few concurrent live tokens; 1 day tracks a launch's life more closely. Lumpiness vs responsiveness; a governance term either way.
 - The endowment record's principal has no holders. Where it goes if the pad winds down is a governance question, like the vault's own ED today.
 - The curve leg's `K = 2` is higher than the pool's 1.25 because the creator share is larger there; whether to use the pool's `K` for both, conservatively, is a one-line choice.
+
+### 12.8 Seeding the pot, and the broker ceiling (measured 2026-09-18)
+
+Two numbers decide whether any seed makes sense. They are recorded here with how they were measured.
+
+**The sizing rule.** With the cap of §12.3 the pad can pay out at most `c` (25 bps on a tier-3 pool at 5 / 5 / 20) of its organic pool volume per window. A pot's yield is `0.10 × pot` per year, so the pot that exactly reaches the cap at an annual pool volume `V` is
+
+```
+pot = 0.10⁻¹ × 25 bps × V = 2.5 % of annual pool volume
+```
+
+130k VTRS for a 5M/yr pad, 390k for 15M/yr, 1.6M for 64M/yr (≈ 43 tokens of 1.5M lifetime volume a year). Below the line every token receives the cap — 25 bps of its volume during its life, 25 % of graduation mcap at τ = 100 — from the first window, which the organic pot (§12.4) reaches only after 12.5 years. Above the line the surplus compounds unspent until volume catches up; at 100k/week of volume a 1.6M seed pays out 8 % of its yield and parks 92 %. Seed to the volume you expect in year one and top up; the money never returns (the yield buys tokens that are burned), and a seed on today's per-launch pallet does nothing at all (its shares attract LNRG that no venue can spend). Seeding is reconsidered when there is volume to size against.
+
+**The broker ceiling.** Every VTRS the treasury realises — paid out or compounded — comes from selling energy to the broker (§1 C1) out of the broker's VTRS reserve. That reserve is a *stock the Foundation tops up*, not a flow from gas. Measured on mainnet at block 12,665,929 by reading `energyBroker.totalEnergyBurn` / `energyBurn` (a 336-session ≈ 14-day rolling window), `energyFeeApi.estimateCallFee`, and the broker account (`modlenergybr`, `0x6d6f…6272…`) at 10-day intervals over 180 days:
+
+| Quantity | Value | Method |
+|---|---|---|
+| Gas burned, trailing 14 days | 1.8 × 10⁻⁷ VNRG ≈ 2,460 VTRS (≈ 180 paying transactions; a transfer costs 10⁻⁹ VNRG ≈ 13.7 VTRS) | `totalEnergyBurn` × the fee quote's VNRG→VTRS ratio |
+| **Gas demand, annualised** | **≈ 60–150k VTRS/yr** (14-day burns ranged 1.4–4.3 × 10¹¹ raw over 180 days) | same, across the 10-day samples |
+| Broker VTRS reserve | 4.22M VTRS | `system.account(broker)` |
+| Reserve drain | −140k to −260k VTRS per 10 days ≈ **5–9M VTRS/yr**, every sample for 180 days | successive reads |
+| Refill | one event: 117k → 5.02M between 60 and 50 days ago (+4.9M in one step) | successive reads |
+| Total stake | 173M VTRS at APR 10 % → 17M VTRS/yr of yield notionally realisable | `erasTotalStake`, `annualPercentageRate` |
+| Signed extrinsics | 4 in 120 blocks sampled every 6 h over 30 days; 0 in the last 50 blocks | `chain.getBlock` |
+
+Reading: gas pays for ~1 % of what stakers withdraw. The reserve is drained by stakers selling energy at ~5M VTRS/yr and refilled by a discretionary top-up when it nears empty; at the current drain the 4.2M lasts about ten months. So the ceiling on the treasury's realisable yield is not the pad's volume and not the chain's gas demand: it is **the Foundation's refill policy**, shared pro rata with every other seller. A 300k organic pot (30k VTRS/yr) is 0.5 % of the drain; a 1.6M seed (160k/yr) is 3 %; either is absorbable while refills continue, and neither is if they stop. `InsufficientLiquidity` is the failure mode either way (§6.4 step 2, FM-T4: unsold LNRG waits).
+
+**What has to be asked, since it is not on chain:** what fills the broker — the source of the +4.9M, its cadence, and whether "treasury recycling" means protocol revenue is routed to it; whether the Foundation intends the reserve to keep up with the 5–9M/yr drain indefinitely; and whether a pad treasury selling on the order of 10⁴–10⁵ VTRS/yr is inside that plan. The mainnet runtime is spec 213, before the three-energy-asset change: its broker trades VNRG (`energyAsset = 0`), so the LNRG path this pallet uses (§1 C1) is a 219+ fact, and the figures above are the VNRG market's.
