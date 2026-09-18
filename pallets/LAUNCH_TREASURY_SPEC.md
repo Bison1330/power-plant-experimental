@@ -482,3 +482,61 @@ Recorded on the branch that implements it; each is small and none changes a deci
     - **Experimental's history is the record.** `git log` there answers "is this fixed"; the `-x` cherry-pick lines of the old rule are no longer how anything crosses. A release is a tag on a green commit — experimental carries CI so that every pinnable commit has been built and tested as its consumers will build it.
 
     What crosses between the two consumers is therefore nothing but the pin and the runtime-side code around it. Dependency alignment is by exact source string: experimental's `[workspace.dependencies]` name polkadot-sdk as power-plant does (`git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2407"`), and its `Cargo.lock` resolves to the same commit, so that a consumer's build sees one `frame-support`, not two.
+
+---
+
+## 11. Economics — the ceiling at fee-slice scale (2026-09-18)
+
+The conclusion of the rate analysis, recorded here so it is not re-derived. Every bound below is read from the code as it stands (`FeeRouting::is_valid_default` / `is_valid_for`, the launchpad's `validate_params`, the R7 sizing in `compound`), not from the prose above it.
+
+### 11.1 The formula
+
+For a launch whose pool trades `volume` VTRS over its life, at a treasury slice of `rate` (fraction of volume) and the chain's target APR of 10 %:
+
+```
+principal          = rate × volume
+buyback / yr       = 0.10 × principal
+buyback/yr ÷ graduation mcap = rate × turnover × 10 %      where turnover = volume ÷ graduation mcap
+```
+
+Graduation mcap is `5T` (the pool is seeded with `T` against 20 % of supply). So the yield leg, as a fraction of what the token was worth at graduation, is the slice times the turnover times a tenth. Turnover is the variable that matters; the slice can move it only within the bounds in §11.2.
+
+### 11.2 The ceiling on each leg
+
+**Pool.** D9 bounds `protocol + creator + treasury ≤ fee_tier × 10` bps and requires the *default* routing to validate at `MIN_LAUNCH_FEE_TIER = 3`, so **routed ≤ 30 bps whatever tier a launch pool actually uses**. With the creator's 5 untouchable and the protocol's 5 ours: **20 bps** costs no constituency (the locked LP's share goes to zero), **25 bps** costs us, 30 would cost the creator. `pool_fee_tier = 10` does not raise the treasury's ceiling — the default still validates at tier 3 — it hands the extra 70 bps to the locked LP. Above 25 needs a tier-aware default or per-launch routing: D9 code.
+
+**R7** bounds the slice, not the accumulation (impact ≤ `2 × fee − 1` bps; ≈ 0.3 % of the reserve per slice at tier 3, one per 10 blocks ≈ 425 % of reserve per day). Never binding.
+
+**Curve.** `protocol + treasury ≥ 50 %` of the fee is the only bound, so the treasury may take the protocol's whole half — 0.5 % of curve volume — with the creator untouched. Curve volume is a few × `T`; the leg is small at any share.
+
+**Who pays a larger pool slice.** The pool's share of every fee is left in the pool account and folded into reserves by `sync_reserves` before the next swap — LP fees compound into depth, Uniswap-v2 style. Routing that share to the treasury removes nothing from current reserves (price impact at any moment is unchanged); it foregoes the deepening, by exactly the treasury's principal. On a 100 %-locked launch pool that deepening is dead weight. A third-party LP added after graduation would lose its fee income at 20 bps; today none exists. Routed slices are always VTRS; the pool share is taken in the input asset, so on sells the foregone deepening is token-side.
+
+A treasury slice proportional to the locked fraction of the LP converges to the same 20 bps on a 100 %-locked pool; it adds fairness to third-party LPs, not headroom, and it is a dynamic split in the swap path — D9 code.
+
+### 11.3 The table (T = 3,000 VTRS; graduation mcap 15,000; −95 % = 750)
+
+| Volume | Turnover | Rate | Principal | Buyback/yr | of grad mcap /yr | of collapsed mcap /yr |
+|---|---|---|---|---|---|---|
+| 300k | 20× | 10 bps | 300 | 30 | 0.2 % | 4 % |
+| | | 20 bps | 600 | 60 | 0.4 % | 8 % |
+| | | 25 bps | 750 | 75 | 0.5 % | 10 % |
+| | | 90 bps (tier 10, code) | 2,700 | 270 | 1.8 % | 36 % |
+| 1.5M | 100× | 10 bps | 1,500 | 150 | 1.0 % | 20 % |
+| | | 20 bps | 3,000 | 300 | 2.0 % | 40 % |
+| | | 25 bps | 3,750 | 375 | 2.5 % | 50 % |
+| | | 90 bps (tier 10, code) | 13,500 | 1,350 | 9.0 % | 180 % |
+| 10M | 667× | 10 bps | 10,000 | 1,000 | 6.7 % | 133 % |
+| | | 20 bps | 20,000 | 2,000 | 13.3 % | 267 % |
+| | | 90 bps (tier 10, code) | 90,000 | 9,000 | 60 % | 1,200 % |
+
+### 11.4 The conclusion
+
+**At a 0.3 % pool fee the yield leg never matters, at any reachable slice.** The ceiling is 2–2.5× today's; at the ceiling a token with ordinary turnover buys back 0.5 %/yr of its graduation mcap, one with heavy turnover 2.5 %/yr.
+
+**The yield leg matters only if traders pay 1 % and most of it is the treasury's.** At tier 10 with a tier-aware default routing ~90 bps to the treasury, the 100×-turnover token accumulates 90 % of its graduation mcap and buys back 9 %/yr of it — a figure a holder notices on a live token. That needs D9 code (a tier-aware `is_valid_default` or per-launch routing) and a decision that traders pay 1 % rather than 0.3 %. Neither is made; the code is not to be written until the review lands and the decision is.
+
+**The principal leg matters already** — 10–25 % of graduation mcap on a 100×-turnover token at today's rates — but only in a design where the principal reaches holders rather than being spent as more buybacks (§2.4's retirement burn is the weakest use of it). That is the redemption question, which waits on counsel.
+
+### 11.5 What was done
+
+`set_default_fee_routing(5, 5, 20)` on the dev chain, sudo, finalized at block 844,554 on 2026-09-18 (spec 225). It costs no constituency and doubles the principal. Routing is snapshotted into `PoolInfo` at seed, so it applies to pools seeded from that block on; the four pools existing at the time keep their snapshots (all 0/0/0 — they predate D4's defaults). The curve leg's `treasury_share_bps` (2,500 → up to 5,000 with the protocol's share to 0) was left as is until the spend side is decided.
