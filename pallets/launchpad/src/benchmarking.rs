@@ -76,6 +76,7 @@ fn create<T: Config>(creator: &T::AccountId) -> LaunchId {
         Zero::zero(),
         None,
         None,
+        Default::default(),
     )
     .expect("create launch");
     id
@@ -185,6 +186,7 @@ mod benchmarks {
             Zero::zero(),
             None,
             Some(metadata::<T>(d, u)),
+            Default::default(),
         );
 
         assert_eq!(Curves::<T>::get(id).expect("curve").phase, Phase::Trading);
@@ -382,6 +384,77 @@ mod benchmarks {
         let c = Curves::<T>::get(id).expect("curve");
         assert_eq!(c.phase, Phase::Graduated);
         assert!(!c.lp_shares.is_zero());
+        Ok(())
+    }
+
+    /// L3: a committed launch with a curve-leg fee owed and enough pending
+    /// to run a slice — the worst case is claim + buy + burn in one call.
+    #[benchmark]
+    fn disburse() -> Result<(), BenchmarkError> {
+        if T::MaxCurveFeeBps::get() == 0 || T::MinProtocolShareBps::get() >= BPS {
+            return Err(BenchmarkError::Skip);
+        }
+        let mut p = Params::<T>::get();
+        p.curve_fee_bps = T::MaxCurveFeeBps::get();
+        p.protocol_share_bps = T::MinProtocolShareBps::get();
+        Launchpad::<T>::set_params(manage_origin::<T>()?, p).expect("set params");
+
+        let caller: T::AccountId = whitelisted_caller();
+        fund::<T>(&caller, rich::<T>());
+        let id = NextLaunchId::<T>::get();
+        Launchpad::<T>::create_launch(
+            RawOrigin::Signed(caller.clone()).into(),
+            bounded::<T>(1, b'N'),
+            bounded::<T>(1, b'S'),
+            None,
+            Zero::zero(),
+            Zero::zero(),
+            None,
+            None,
+            CreatorCommitments { fee_disposition: FeeDisposition::BuybackBurn, lock: None },
+        )
+        .expect("create launch");
+        let buyer = funded::<T>("buyer");
+        Launchpad::<T>::buy(RawOrigin::Signed(buyer).into(), id, small_quote::<T>(), Zero::zero())
+            .expect("buy");
+        assert!(!Curves::<T>::get(id).expect("curve").creator_fees_unclaimed.is_zero());
+        let keeper = funded::<T>("keeper");
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(keeper), id);
+
+        assert!(Curves::<T>::get(id).expect("curve").creator_fees_unclaimed.is_zero());
+        Ok(())
+    }
+
+    /// L3: release a fully vested lock.
+    #[benchmark]
+    fn claim_locked() -> Result<(), BenchmarkError> {
+        let caller: T::AccountId = whitelisted_caller();
+        fund::<T>(&caller, rich::<T>());
+        let id = NextLaunchId::<T>::get();
+        Launchpad::<T>::create_launch(
+            RawOrigin::Signed(caller.clone()).into(),
+            bounded::<T>(1, b'N'),
+            bounded::<T>(1, b'S'),
+            None,
+            small_quote::<T>(),
+            Zero::zero(),
+            None,
+            None,
+            CreatorCommitments {
+                fee_disposition: FeeDisposition::Recipient,
+                lock: Some(LockSchedule { cliff: 1u32.into(), vest: 1u32.into() }),
+            },
+        )
+        .expect("create launch");
+        let lock = Locks::<T>::get(id).expect("lock");
+        frame_system::Pallet::<T>::set_block_number(lock.vest_end);
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller.clone()), id);
+
+        assert_eq!(Locks::<T>::get(id).expect("lock").released, lock.total);
         Ok(())
     }
 

@@ -53,6 +53,8 @@ pub trait WeightInfo {
 	fn set_params() -> Weight;
 	fn set_creation_paused() -> Weight;
 	fn force_seed_into_existing_pool() -> Weight;
+	fn disburse() -> Weight;
+	fn claim_locked() -> Weight;
 }
 
 /// Weights for `pallet_launchpad` using the Substrate node and recommended hardware.
@@ -347,6 +349,24 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(T::DbWeight::get().reads(14_u64))
 			.saturating_add(T::DbWeight::get().writes(11_u64))
 	}
+	/// L3 placeholder (LAUNCH_TREASURY_SPEC runbook): not yet measured.
+	/// Storage: `Launchpad::Launches` (r:1 w:0), `Launchpad::Curves` (r:1 w:1),
+	/// `VitreusDex::CreatorFeesUnclaimed` (r:1 w:1), `VitreusDex::Pools` (r:1 w:1),
+	/// `System::Account` (r:3 w:3), `Assets::Account` (r:2 w:2), `Assets::Asset` (r:1 w:1),
+	/// `Launchpad::LastDisburseBlock` (r:1 w:1)
+	fn disburse() -> Weight {
+		Weight::from_parts(250_000_000, 12000)
+			.saturating_add(T::DbWeight::get().reads(11_u64))
+			.saturating_add(T::DbWeight::get().writes(10_u64))
+	}
+	/// L3 placeholder: not yet measured.
+	/// Storage: `Launchpad::Launches` (r:1 w:0), `Launchpad::Locks` (r:1 w:1),
+	/// `Assets::Asset` (r:1 w:1), `Assets::Account` (r:2 w:2), `System::Account` (r:1 w:1)
+	fn claim_locked() -> Weight {
+		Weight::from_parts(90_000_000, 6000)
+			.saturating_add(T::DbWeight::get().reads(6_u64))
+			.saturating_add(T::DbWeight::get().writes(5_u64))
+	}
 }
 
 // For backwards compatibility and tests.
@@ -639,5 +659,23 @@ impl WeightInfo for () {
 		Weight::from_parts(275_872_000, 8781)
 			.saturating_add(RocksDbWeight::get().reads(14_u64))
 			.saturating_add(RocksDbWeight::get().writes(11_u64))
+	}
+	/// L3 placeholder (LAUNCH_TREASURY_SPEC runbook): not yet measured.
+	/// Storage: `Launchpad::Launches` (r:1 w:0), `Launchpad::Curves` (r:1 w:1),
+	/// `VitreusDex::CreatorFeesUnclaimed` (r:1 w:1), `VitreusDex::Pools` (r:1 w:1),
+	/// `System::Account` (r:3 w:3), `Assets::Account` (r:2 w:2), `Assets::Asset` (r:1 w:1),
+	/// `Launchpad::LastDisburseBlock` (r:1 w:1)
+	fn disburse() -> Weight {
+		Weight::from_parts(250_000_000, 12000)
+			.saturating_add(RocksDbWeight::get().reads(11_u64))
+			.saturating_add(RocksDbWeight::get().writes(10_u64))
+	}
+	/// L3 placeholder: not yet measured.
+	/// Storage: `Launchpad::Launches` (r:1 w:0), `Launchpad::Locks` (r:1 w:1),
+	/// `Assets::Asset` (r:1 w:1), `Assets::Account` (r:2 w:2), `System::Account` (r:1 w:1)
+	fn claim_locked() -> Weight {
+		Weight::from_parts(90_000_000, 6000)
+			.saturating_add(RocksDbWeight::get().reads(6_u64))
+			.saturating_add(RocksDbWeight::get().writes(5_u64))
 	}
 }

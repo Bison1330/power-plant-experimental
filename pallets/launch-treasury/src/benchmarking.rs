@@ -87,6 +87,7 @@ fn graduated_launch<T: Config>(i: u32) -> LaunchId {
         Zero::zero(),
         None,
         None,
+        Default::default(),
     )
     .expect("create launch");
     assert_eq!(

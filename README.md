@@ -17,7 +17,7 @@ Cargo.toml                       # workspace root; polkadot-sdk named exactly as
 Cargo.lock                       # resolves polkadot-sdk to the same commit as power-plant's lock
 pallets/vitreus-dex/             # constant-product AMM, LP positions, per-pool fee routing, solver marketplace
 pallets/vitreus-dex/SECURITY_AUDIT.md
-pallets/launchpad/               # bonding-curve token launches graduating into a locked DEX pool
+pallets/launchpad/               # bonding-curve token launches graduating into a locked DEX pool; L3 creator commitments (spec §10)
 pallets/launch-treasury/         # a slice of every launch-token trade, staked as one cooperator; yield burns the token
 pallets/LAUNCHPAD_SPEC.md        # the launchpad's design, invariants and failure modes
 pallets/LAUNCH_TREASURY_SPEC.md  # the treasury's — and §10.12, where pallet code lives and how consumers pin it

@@ -39,7 +39,8 @@ use frame_support::{
             Mutate as FungiblesMutate,
         },
         tokens::{
-            Fortitude::Polite,
+            Fortitude::{self, Polite},
+            Precision,
             Preservation::{Expendable, Preserve},
         },
         EnsureOrigin, Get,
@@ -55,8 +56,8 @@ use scale_info::TypeInfo;
 use sp_core::U256;
 use sp_runtime::{
     traits::{
-        AccountIdConversion, AtLeast32BitUnsigned, Bounded, CheckedSub, Convert, Hash, One,
-        Saturating, UniqueSaturatedFrom, Zero,
+        AccountIdConversion, AtLeast32BitUnsigned, Bounded, CheckedAdd, CheckedSub, Convert, Hash,
+        One, SaturatedConversion, Saturating, UniqueSaturatedFrom, Zero,
     },
     DispatchError, RuntimeDebug,
 };
@@ -123,8 +124,69 @@ pub enum Phase {
     Graduated,
 }
 
+/// L3 (§10.3): where a launch's creator-fee share goes. `Recipient` is the
+/// default and is §2.5 unchanged. `BuybackBurn` sends both legs to a
+/// pallet-derived commitment account that buys the token on its own venue
+/// and burns it; no person is ever paid.
+#[derive(
+    Clone, Copy, Default, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen,
+)]
+pub enum FeeDisposition {
+    #[default]
+    Recipient,
+    BuybackBurn,
+}
+
+/// L3 (§10.3): the schedule a locked tranche releases on. Applies to the
+/// tokens the creator's `initial_buy` receives, and to nothing else — the
+/// pallet sees one signer and binds what that signer hands it.
+#[derive(Clone, Copy, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+pub struct LockSchedule<BlockNumber> {
+    /// Blocks after create during which nothing is released.
+    pub cliff: BlockNumber,
+    /// Blocks after the cliff over which the tranche releases linearly; 0 = all at the cliff.
+    pub vest: BlockNumber,
+}
+
+/// L3 (§10.2): creator-bound. Snapshotted into [`Launch`] at create; no
+/// extrinsic writes it afterwards. Every field's default is "no commitment"
+/// and every non-default value binds further. Nothing in here names a
+/// protocol term — no bps, no target, no share, no tier (§10.4, guard 2);
+/// `commitments_touch_nothing_protocol_owns` is the test that keeps it so.
+#[derive(
+    Clone, Copy, Default, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen,
+)]
+pub struct CreatorCommitments<BlockNumber> {
+    pub fee_disposition: FeeDisposition,
+    pub lock: Option<LockSchedule<BlockNumber>>,
+}
+
+impl<B> CreatorCommitments<B> {
+    pub fn is_committed(&self) -> bool {
+        self.fee_disposition != FeeDisposition::Recipient || self.lock.is_some()
+    }
+    pub fn burns_fees(&self) -> bool {
+        self.fee_disposition == FeeDisposition::BuybackBurn
+    }
+}
+
+/// L3: what one `disburse` did — `(claimed, vtrs_burned_in, tokens_burned,
+/// interval_ok)`; the last says whether a slice was even allowed.
+pub type DisburseOutcome<T> = (BalanceOf<T>, BalanceOf<T>, BalanceOf<T>, bool);
+
+/// L3: the live state of a launch's locked tranche. `total − released` is
+/// exactly the lock account's token balance (I-L3-2).
+#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+pub struct LockState<Balance, BlockNumber> {
+    pub total: Balance,
+    pub released: Balance,
+    pub cliff_end: BlockNumber,
+    pub vest_end: BlockNumber,
+}
+
 /// Cold, write-once launch record (§1.2). `creator_fee_recipient` is the only
-/// mutable field.
+/// mutable field. `commitments` (L3, §10) is the creator's, not the
+/// protocol's: it is read alongside the terms and never changes them.
 #[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
 #[scale_info(skip_type_params(T))]
 pub struct Launch<T: Config> {
@@ -135,6 +197,7 @@ pub struct Launch<T: Config> {
     pub created_at: BlockNumberFor<T>,
     pub curve: CurveParams<BalanceOf<T>>,
     pub params_hash: T::Hash,
+    pub commitments: CreatorCommitments<BlockNumberFor<T>>,
 }
 
 /// Off-curve presentation data for a launch (§1.2). Cold: read on a page
@@ -257,6 +320,10 @@ impl<A, B: Zero, N> OnCurveBuy<A, B, N> for () {
     }
 }
 
+// `create_launch` takes eight arguments since L3; the call's signature is the
+// interface, and the `#[pallet::call]` expansion trips the lint where a
+// per-function allow cannot reach.
+#[allow(clippy::too_many_arguments)]
 #[frame_support::pallet]
 pub mod pallet {
     use super::*;
@@ -266,7 +333,7 @@ pub mod pallet {
     /// v1 (L1): `treasury_share_bps` on the params, `treasury_fees_paid` and
     /// `last_trade_block` on the curve state. No chain the submission targets
     /// has a v0 launch, so there is no migration here; the fork carries its own.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(2);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -367,6 +434,27 @@ pub mod pallet {
         /// Anti-snipe hook; `()` in v1.
         type BuyHook: OnCurveBuy<Self::AccountId, BalanceOf<Self>, BlockNumberFor<Self>>;
 
+        /// L3: derives a launch's commitment account (creator fees to burn);
+        /// distinct from `PalletId` so the 8-byte launch id stays the whole
+        /// sub-seed on a 20-byte AccountId (see `escrow_account`).
+        #[pallet::constant]
+        type CommitPalletId: Get<PalletId>;
+        /// L3: derives a launch's lock account (the locked tranche).
+        #[pallet::constant]
+        type LockPalletId: Get<PalletId>;
+        /// L3: `cliff + vest` of a lock may not exceed this.
+        #[pallet::constant]
+        type MaxLockBlocks: Get<BlockNumberFor<Self>>;
+        /// L3: a `disburse` slice may move the venue price by at most this
+        /// (constant-product: `cap = reserve × bps / (2 × BPS)`). A constant,
+        /// not a `Params` term: it bounds a keeper's call, and a term here
+        /// would be a protocol knob a commitment could be seen to touch.
+        #[pallet::constant]
+        type MaxBurnImpactBps: Get<u16>;
+        /// L3: blocks between two `disburse` slices of one launch.
+        #[pallet::constant]
+        type MinBurnInterval: Get<BlockNumberFor<Self>>;
+
         /// Weight information for the extrinsics of this pallet.
         type WeightInfo: WeightInfo;
     }
@@ -412,6 +500,18 @@ pub mod pallet {
     /// none. Replaced whole by `set_launch_metadata`; never read on a trade.
     #[pallet::storage]
     pub type Metadata<T: Config> = StorageMap<_, Blake2_128Concat, LaunchId, LaunchMetadataOf<T>>;
+
+    /// L3 (§10.3): the locked tranche of a launch whose commitments carry a
+    /// `lock`. Written once at create, then only `released` moves.
+    #[pallet::storage]
+    pub type Locks<T: Config> =
+        StorageMap<_, Blake2_128Concat, LaunchId, LockState<BalanceOf<T>, BlockNumberFor<T>>>;
+
+    /// L3: the block of the last burn slice `disburse` executed for a launch;
+    /// absent until the first, which is therefore never `TooSoon`.
+    #[pallet::storage]
+    pub type LastDisburseBlock<T: Config> =
+        StorageMap<_, Blake2_128Concat, LaunchId, BlockNumberFor<T>, OptionQuery>;
 
     // ---- events / errors (§7) --------------------------------------------
 
@@ -479,6 +579,27 @@ pub mod pallet {
             deviation_bps: u16,
             shares: BalanceOf<T>,
         },
+        /// L3: the initial buy's tokens were moved to the lock account.
+        Locked {
+            launch_id: LaunchId,
+            amount: BalanceOf<T>,
+            cliff_end: BlockNumberFor<T>,
+            vest_end: BlockNumberFor<T>,
+        },
+        /// L3: vested tokens released to the creator.
+        LockReleased {
+            launch_id: LaunchId,
+            amount: BalanceOf<T>,
+        },
+        /// L3: one `disburse`. `claimed` is the VTRS moved into the
+        /// commitment account this call (both legs); `vtrs_burned_in` and
+        /// `tokens_burned` are this call's slice, zero if none ran.
+        Disbursed {
+            launch_id: LaunchId,
+            claimed: BalanceOf<T>,
+            vtrs_burned_in: BalanceOf<T>,
+            tokens_burned: BalanceOf<T>,
+        },
     }
 
     #[pallet::error]
@@ -510,6 +631,20 @@ pub mod pallet {
         SellExceedsSold,
         /// `force_seed_into_existing_pool` needs an existing pool; use `graduate` otherwise.
         PoolNotFound,
+        /// L3: `cliff + vest` exceeds `MaxLockBlocks`.
+        CommitmentOutOfBounds,
+        /// L3: a lock needs an `initial_buy` to bind.
+        LockWithoutPosition,
+        /// L3: this launch's creator fees are committed; `claim_creator_fees` cannot take them.
+        Committed,
+        /// L3: this launch has no such commitment; nothing to disburse or release.
+        NotCommitted,
+        /// L3: nothing to claim and nothing to burn.
+        NothingToDo,
+        /// L3: the burn interval has not passed and there was nothing to claim.
+        TooSoon,
+        /// L3: nothing has vested since the last release.
+        NothingVested,
     }
 
     // ---- calls (§2) ------------------------------------------------------
@@ -533,10 +668,14 @@ pub mod pallet {
             min_tokens_out: BalanceOf<T>,
             expected_params_hash: Option<T::Hash>,
             metadata: Option<LaunchMetadataOf<T>>,
+            commitments: CreatorCommitments<BlockNumberFor<T>>,
         ) -> DispatchResultWithPostInfo {
             let creator = ensure_signed(origin)?;
             ensure!(!CreationPaused::<T>::get(), Error::<T>::CreationPaused);
             ensure!(!name.is_empty() && !symbol.is_empty(), Error::<T>::InvalidMetadata);
+            // L3 (§10.4, guard 2): validated on its own, before any protocol
+            // term is read, by a function that sees nothing but the commitments.
+            Self::ensure_commitments_in_bounds(&commitments, !initial_buy.is_zero())?;
 
             let id = NextLaunchId::<T>::get();
             // FM-17 (asset-id squatting): the reserved id `LaunchAssetBase + id`
@@ -601,8 +740,29 @@ pub mod pallet {
                     created_at: now,
                     curve,
                     params_hash,
+                    commitments,
                 },
             );
+            // L3: a commitment's accounts must exist before anything can reach
+            // them — a sub-ED first fee claim would otherwise fail (the shape of
+            // vitreus-dex Finding 14), and a non-sufficient asset cannot be held
+            // by an account with no provider. The creator funds each ED.
+            if commitments.burns_fees() {
+                T::Currency::transfer(
+                    &creator,
+                    &Self::commit_account(id),
+                    T::Currency::minimum_balance(),
+                    Preserve,
+                )?;
+            }
+            if commitments.lock.is_some() {
+                T::Currency::transfer(
+                    &creator,
+                    &Self::lock_account(id),
+                    T::Currency::minimum_balance(),
+                    Preserve,
+                )?;
+            }
             Curves::<T>::insert(
                 id,
                 CurveState::<T> {
@@ -640,8 +800,13 @@ pub mod pallet {
             // 8. optional atomic first buy. Charged as a crossing buy up front;
             // refunded to a plain buy when the curve was not exhausted.
             if !initial_buy.is_zero() {
-                let (crossed, _) =
+                let (crossed, tokens_out) =
                     Self::do_buy(&creator, id, initial_buy, min_tokens_out, true, true)?;
+                // L3 (§10.3): the initial buy's tokens are the locked tranche.
+                // Moved in the same call, so no block ever sees them free.
+                if let Some(schedule) = commitments.lock {
+                    Self::lock_tranche(&creator, id, tokens_out, schedule, now)?;
+                }
                 if !crossed {
                     let w = <T as Config>::WeightInfo::create_launch(
                         name.len() as u32,
@@ -709,6 +874,8 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let launch = Launches::<T>::get(launch_id).ok_or(Error::<T>::LaunchNotFound)?;
             ensure!(who == launch.creator_fee_recipient, Error::<T>::NotFeeRecipient);
+            // L3: a committed stream is never paid to a person (§10.3).
+            ensure!(!launch.commitments.burns_fees(), Error::<T>::Committed);
             let amount = Curves::<T>::try_mutate(
                 launch_id,
                 |maybe| -> Result<BalanceOf<T>, DispatchError> {
@@ -768,6 +935,64 @@ pub mod pallet {
         }
 
         /// §2.8 — affects launches created afterwards only (FM-10).
+        /// L3 (§10.5): claim a committed launch's creator fees into its
+        /// commitment account and burn one capped slice. Anyone; nothing is
+        /// paid to the caller.
+        #[pallet::call_index(10)]
+        #[pallet::weight(<T as Config>::WeightInfo::disburse())]
+        pub fn disburse(origin: OriginFor<T>, launch_id: LaunchId) -> DispatchResult {
+            ensure_signed(origin)?;
+            let (claimed, vtrs_burned_in, tokens_burned, interval_ok) =
+                Self::do_disburse(launch_id)?;
+            if claimed.is_zero() && vtrs_burned_in.is_zero() {
+                let commit = Self::commit_account(launch_id);
+                let pending = T::Currency::reducible_balance(&commit, Preserve, Polite);
+                return Err(if !interval_ok && pending >= T::Currency::minimum_balance() {
+                    Error::<T>::TooSoon
+                } else {
+                    Error::<T>::NothingToDo
+                }
+                .into());
+            }
+            Self::deposit_event(Event::Disbursed {
+                launch_id,
+                claimed,
+                vtrs_burned_in,
+                tokens_burned,
+            });
+            Ok(())
+        }
+
+        /// L3 (§10.5): release what has vested of the locked tranche to the
+        /// creator. Creator only; nothing before the cliff.
+        #[pallet::call_index(11)]
+        #[pallet::weight(<T as Config>::WeightInfo::claim_locked())]
+        pub fn claim_locked(origin: OriginFor<T>, launch_id: LaunchId) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let launch = Launches::<T>::get(launch_id).ok_or(Error::<T>::LaunchNotFound)?;
+            ensure!(who == launch.creator, Error::<T>::NotFeeRecipient);
+            let now = frame_system::Pallet::<T>::block_number();
+            let amount = Locks::<T>::try_mutate(
+                launch_id,
+                |maybe| -> Result<BalanceOf<T>, DispatchError> {
+                    let lock = maybe.as_mut().ok_or(Error::<T>::NotCommitted)?;
+                    let due = Self::vested(lock, now).saturating_sub(lock.released);
+                    ensure!(!due.is_zero(), Error::<T>::NothingVested);
+                    lock.released = lock.released.saturating_add(due);
+                    Ok(due)
+                },
+            )?;
+            T::LaunchAssets::transfer(
+                launch.asset_id,
+                &Self::lock_account(launch_id),
+                &who,
+                amount,
+                Expendable,
+            )?;
+            Self::deposit_event(Event::LockReleased { launch_id, amount });
+            Ok(())
+        }
+
         #[pallet::call_index(6)]
         #[pallet::weight(<T as Config>::WeightInfo::set_params())]
         pub fn set_params(origin: OriginFor<T>, new: LaunchParams<BalanceOf<T>>) -> DispatchResult {
@@ -935,9 +1160,207 @@ pub mod pallet {
         /// runtime binds `pallet_vitreus_dex::Config::CreatorFeeRecipient`
         /// to this through an adapter; the DEX itself knows no creators.
         pub fn creator_fee_recipient_for(asset: AssetIdOf<T>) -> Option<T::AccountId> {
-            AssetToLaunch::<T>::get(asset)
-                .and_then(Launches::<T>::get)
-                .map(|l| l.creator_fee_recipient)
+            let id = AssetToLaunch::<T>::get(asset)?;
+            let l = Launches::<T>::get(id)?;
+            // L3 (§10.3): a committed stream resolves to the commitment
+            // account. This is the only DEX-facing change L3 makes: the
+            // routing, its bound and `claim_pool_creator_fees` are untouched.
+            Some(if l.commitments.burns_fees() {
+                Self::commit_account(id)
+            } else {
+                l.creator_fee_recipient
+            })
+        }
+
+        /// L3: the account a committed fee stream is claimed into and burned
+        /// from. Pallet-derived, keyless; the pallet dispatches as it.
+        pub fn commit_account(id: LaunchId) -> T::AccountId {
+            T::CommitPalletId::get().into_sub_account_truncating(id)
+        }
+
+        /// L3: the account that holds a launch's locked tranche.
+        pub fn lock_account(id: LaunchId) -> T::AccountId {
+            T::LockPalletId::get().into_sub_account_truncating(id)
+        }
+
+        /// L3 (§10.2): reject-only. Takes the commitments and one bit about
+        /// the creator's position; it cannot see a protocol term.
+        pub fn ensure_commitments_in_bounds(
+            c: &CreatorCommitments<BlockNumberFor<T>>,
+            has_position: bool,
+        ) -> DispatchResult {
+            if let Some(l) = c.lock {
+                ensure!(has_position, Error::<T>::LockWithoutPosition);
+                let span = l.cliff.checked_add(&l.vest).ok_or(Error::<T>::CommitmentOutOfBounds)?;
+                ensure!(span <= T::MaxLockBlocks::get(), Error::<T>::CommitmentOutOfBounds);
+            }
+            Ok(())
+        }
+
+        /// L3: move `amount` of the launch token from `creator` to the lock
+        /// account and record the schedule. Called once, inside `create_launch`.
+        fn lock_tranche(
+            creator: &T::AccountId,
+            id: LaunchId,
+            amount: BalanceOf<T>,
+            schedule: LockSchedule<BlockNumberFor<T>>,
+            now: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            ensure!(!amount.is_zero(), Error::<T>::LockWithoutPosition);
+            let asset = Self::asset_id_for(id);
+            let lock = Self::lock_account(id);
+            // Expendable: the creator's whole position moves, and an emptied
+            // asset account may be reaped; nothing else of theirs is touched.
+            T::LaunchAssets::transfer(asset, creator, &lock, amount, Expendable)?;
+            let cliff_end = now.saturating_add(schedule.cliff);
+            let vest_end = cliff_end.saturating_add(schedule.vest);
+            Locks::<T>::insert(
+                id,
+                LockState { total: amount, released: Zero::zero(), cliff_end, vest_end },
+            );
+            Self::deposit_event(Event::Locked { launch_id: id, amount, cliff_end, vest_end });
+            Ok(())
+        }
+
+        /// L3: how much of a lock has vested at `now`, before subtracting
+        /// what was released. Linear between `cliff_end` and `vest_end`;
+        /// all of it at `vest_end` (which equals `cliff_end` when `vest == 0`).
+        pub fn vested(
+            lock: &LockState<BalanceOf<T>, BlockNumberFor<T>>,
+            now: BlockNumberFor<T>,
+        ) -> BalanceOf<T> {
+            if now < lock.cliff_end {
+                return Zero::zero();
+            }
+            if now >= lock.vest_end {
+                return lock.total;
+            }
+            let elapsed: u128 = now.saturating_sub(lock.cliff_end).saturated_into();
+            let span: u128 = lock.vest_end.saturating_sub(lock.cliff_end).saturated_into();
+            let total: u128 = lock.total.into();
+            // total × elapsed / span in U256: `total` is up to 10^27.
+            let v = U256::from(total) * U256::from(elapsed) / U256::from(span.max(1));
+            v.as_u128().into()
+        }
+
+        /// L3 (§10.5): claim both legs' unclaimed creator fees into the
+        /// commitment account, then run at most one burn slice. Returns
+        /// `(claimed, vtrs_burned_in, tokens_burned)`.
+        pub fn do_disburse(launch_id: LaunchId) -> Result<DisburseOutcome<T>, DispatchError> {
+            let launch = Launches::<T>::get(launch_id).ok_or(Error::<T>::LaunchNotFound)?;
+            ensure!(launch.commitments.burns_fees(), Error::<T>::NotCommitted);
+            let commit = Self::commit_account(launch_id);
+            let mut claimed: BalanceOf<T> = Zero::zero();
+
+            // Curve leg: what §2.5 would have paid the recipient.
+            let curve_leg = Curves::<T>::mutate(launch_id, |maybe| {
+                maybe
+                    .as_mut()
+                    .map(|c| core::mem::replace(&mut c.creator_fees_unclaimed, Zero::zero()))
+            })
+            .unwrap_or_default();
+            if !curve_leg.is_zero() {
+                T::Currency::transfer(&launch.escrow, &commit, curve_leg, Preserve)?;
+                claimed = claimed.saturating_add(curve_leg);
+            }
+
+            // Pool leg: the DEX's own claim, dispatched as the commitment
+            // account — the resolver names it (§10.3), so the DEX pays it.
+            let asset_kind = T::IntoAssetKind::convert(launch.asset_id);
+            let pair = pallet_vitreus_dex::Pallet::<T>::canonical_pair(
+                asset_kind.clone(),
+                T::NativeAssetKind::get(),
+            );
+            let pool_leg: BalanceOf<T> = pallet_vitreus_dex::CreatorFeesUnclaimed::<T>::get(&pair);
+            if !pool_leg.is_zero() {
+                pallet_vitreus_dex::Pallet::<T>::claim_pool_creator_fees(
+                    frame_system::RawOrigin::Signed(commit.clone()).into(),
+                    asset_kind,
+                )?;
+                claimed = claimed.saturating_add(pool_leg);
+            }
+
+            // One slice, if there is something to spend and the interval passed.
+            let now = frame_system::Pallet::<T>::block_number();
+            let pending = T::Currency::reducible_balance(&commit, Preserve, Polite);
+            let interval_ok = LastDisburseBlock::<T>::get(launch_id)
+                .map_or(true, |last| now.saturating_sub(last) >= T::MinBurnInterval::get());
+            let (spent, burned) = if !pending.is_zero() && interval_ok {
+                Self::burn_slice(&launch, launch_id, &commit, pending)?
+            } else {
+                (Zero::zero(), Zero::zero())
+            };
+            if !spent.is_zero() {
+                LastDisburseBlock::<T>::insert(launch_id, now);
+            }
+            Ok((claimed, spent, burned, interval_ok))
+        }
+
+        /// L3: buy `min(pending, cap)` of the token on the launch's venue with
+        /// the commitment account's VTRS and burn what arrives. The cap is
+        /// the treasury's rule (LAUNCH_TREASURY_SPEC §6.4): the VTRS that
+        /// moves the venue price by `MaxBurnImpactBps`, `reserve × bps /
+        /// (2 × BPS)` for a constant product. What was spent is measured, not
+        /// assumed. A `Complete` curve waiting for its seed has no venue.
+        fn burn_slice(
+            launch: &Launch<T>,
+            launch_id: LaunchId,
+            commit: &T::AccountId,
+            pending: BalanceOf<T>,
+        ) -> Result<(BalanceOf<T>, BalanceOf<T>), DispatchError> {
+            let phase = Curves::<T>::get(launch_id).ok_or(Error::<T>::LaunchNotFound)?.phase;
+            let asset_kind = T::IntoAssetKind::convert(launch.asset_id);
+            let reserve_vtrs: u128 = match phase {
+                Phase::Trading => <Self as CurveVenue<_, _, _, _>>::virtual_reserves(launch_id)
+                    .map(|(q, _)| q.into())
+                    .unwrap_or(0),
+                Phase::Graduated => {
+                    T::Dex::native_reserves(asset_kind.clone()).map(|(n, _)| n.into()).unwrap_or(0)
+                },
+                Phase::Complete => 0,
+            };
+            if reserve_vtrs == 0 {
+                return Ok((Zero::zero(), Zero::zero()));
+            }
+            let cap: u128 = (U256::from(reserve_vtrs) * U256::from(T::MaxBurnImpactBps::get())
+                / U256::from(2u32 * BPS as u32))
+            .as_u128();
+            let y: BalanceOf<T> = pending.min(cap.into());
+            // Dust floor: below one existential deposit a buy is fee-consumed
+            // or unquotable (LAUNCHPAD_SPEC §3.6); the residue waits for the
+            // next claim to top it up, and a launch with nothing more to claim
+            // reads `NothingToDo`.
+            if y < T::Currency::minimum_balance() {
+                return Ok((Zero::zero(), Zero::zero()));
+            }
+            let vtrs_before = T::Currency::balance(commit);
+            let tokens: BalanceOf<T> = match phase {
+                Phase::Trading => Self::do_buy(commit, launch_id, y, Zero::zero(), false, true)?.1,
+                Phase::Graduated => T::Dex::swap_for(
+                    commit,
+                    T::NativeAssetKind::get(),
+                    asset_kind,
+                    y,
+                    Zero::zero(),
+                )?,
+                Phase::Complete => Zero::zero(),
+            };
+            let spent = vtrs_before.saturating_sub(T::Currency::balance(commit));
+            if !tokens.is_zero() {
+                // Expendable: the whole purchase burns, which empties the
+                // commitment account's asset account; it is re-opened by the
+                // next slice's buy (the account keeps its native ED, so it
+                // keeps its provider).
+                T::LaunchAssets::burn_from(
+                    launch.asset_id,
+                    commit,
+                    tokens,
+                    Expendable,
+                    Precision::Exact,
+                    Fortitude::Force,
+                )?;
+            }
+            Ok((spent, tokens))
         }
 
         /// `Reserved = TotalSupply − Sellable`.
@@ -1508,6 +1931,8 @@ pub mod migrations {
                             pool_fee_tier: old.curve.pool_fee_tier,
                         },
                         params_hash: old.params_hash,
+                        // L3 lands after L1 on every chain; a v0 record has no commitment.
+                        commitments: Default::default(),
                     })
                 });
                 let mut curves = 0u64;
@@ -1604,6 +2029,80 @@ pub mod migrations {
             0,
             1,
             VersionUncheckedMigrateToV1<T>,
+            Pallet<T>,
+            <T as frame_system::Config>::DbWeight,
+        >;
+    }
+
+    /// L3 (v1 → v2, LAUNCHPAD_SPEC §10.10): `Launch` gains `commitments`.
+    /// Every stored launch is re-encoded with `Default` — no commitment. A
+    /// commitment exists only if it was made at create; a migration cannot
+    /// make one. `Locks` and `LastDisburseBlock` start empty.
+    pub mod v2 {
+        use super::*;
+
+        /// `Launch` as stored at v1.
+        #[derive(Encode, Decode)]
+        #[allow(missing_docs)]
+        pub struct OldLaunch<T: Config> {
+            pub asset_id: AssetIdOf<T>,
+            pub creator: T::AccountId,
+            pub creator_fee_recipient: T::AccountId,
+            pub escrow: T::AccountId,
+            pub created_at: BlockNumberFor<T>,
+            pub curve: CurveParams<BalanceOf<T>>,
+            pub params_hash: T::Hash,
+        }
+
+        /// Unversioned body; wrap in [`MigrateToV2`].
+        pub struct VersionUncheckedMigrateToV2<T>(PhantomData<T>);
+        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV2<T> {
+            fn on_runtime_upgrade() -> Weight {
+                let mut n = 0u64;
+                Launches::<T>::translate::<OldLaunch<T>, _>(|_id, old| {
+                    n = n.saturating_add(1);
+                    Some(Launch {
+                        asset_id: old.asset_id,
+                        creator: old.creator,
+                        creator_fee_recipient: old.creator_fee_recipient,
+                        escrow: old.escrow,
+                        created_at: old.created_at,
+                        curve: old.curve,
+                        params_hash: old.params_hash,
+                        commitments: Default::default(),
+                    })
+                });
+                log::info!(target: "runtime::launchpad", "L3 migration: {n} launches re-encoded with no commitment");
+                T::DbWeight::get().reads_writes(n, n)
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+                Ok((Launches::<T>::iter_keys().count() as u64).encode())
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+                let before: u64 = Decode::decode(&mut &state[..]).map_err(|_| "decode")?;
+                let mut n = 0u64;
+                for (_id, l) in Launches::<T>::iter() {
+                    n = n.saturating_add(1);
+                    frame_support::ensure!(
+                        !l.commitments.is_committed(),
+                        "no launch is committed by migration"
+                    );
+                }
+                frame_support::ensure!(n == before, "every launch decodes after L3");
+                frame_support::ensure!(Locks::<T>::iter_keys().next().is_none(), "no locks");
+                Ok(())
+            }
+        }
+
+        /// L3 migration, gated on the pallet's on-chain storage version.
+        pub type MigrateToV2<T> = VersionedMigration<
+            1,
+            2,
+            VersionUncheckedMigrateToV2<T>,
             Pallet<T>,
             <T as frame_system::Config>::DbWeight,
         >;

@@ -254,6 +254,8 @@ impl pallet_multisig::Config for Test {
 
 parameter_types! {
     pub const LaunchpadPalletId: PalletId = PalletId(*b"vtrs/lpd");
+    pub const CommitPalletId: PalletId = PalletId(*b"vtrs/cmt");
+    pub const LockPalletId: PalletId = PalletId(*b"vtrs/lck");
     pub const TotalSupply: u128 = 1_000_000_000 * UNIT;
     pub const Sellable: u128 = 800_000_000 * UNIT;
     pub const VirtualTokenFloor: u128 = 266_666_667 * UNIT;
@@ -350,6 +352,11 @@ impl pallet_launchpad::Config for Test {
     type DescriptionLimit = ConstU32<1024>;
     type DefaultLaunchParams = DefaultLaunchParams;
     type BuyHook = RecordingHook;
+    type CommitPalletId = CommitPalletId;
+    type LockPalletId = LockPalletId;
+    type MaxLockBlocks = ConstU64<10_512_000>; // 2 years at 6 s
+    type MaxBurnImpactBps = ConstU16<50>;
+    type MinBurnInterval = ConstU64<10>;
     type WeightInfo = ();
 }
 

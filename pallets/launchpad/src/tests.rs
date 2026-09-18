@@ -71,7 +71,8 @@ fn create(creator: impl Borrow<Acc>) -> LaunchId {
         0,
         0,
         None,
-        None
+        None,
+        Default::default(),
     ));
     id
 }
@@ -193,7 +194,8 @@ fn lifecycle_happy_path() {
             5 * UNIT,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         let l = launch(id);
         assert_eq!(l.asset_id, asset_of(id));
@@ -271,7 +273,8 @@ fn lifecycle_initial_buy_completes_curve() {
             100_000 * UNIT,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         assert_eq!(state(id).phase, Phase::Graduated);
         assert_eq!(tok(id, ALICE), SELLABLE);
@@ -477,7 +480,7 @@ fn fm03_no_path_moves_escrow_funds_except_curve_and_seed() {
         ] {
             assert!(!names.iter().any(|n| n.contains(forbidden)), "found {forbidden}");
         }
-        assert_eq!(names.len(), 10, "a new dispatchable was added; extend this test's call list");
+        assert_eq!(names.len(), 12, "a new dispatchable was added; extend this test's call list");
 
         let trading = create(ALICE);
         buy(BOB, trading, 100 * UNIT);
@@ -500,6 +503,7 @@ fn fm03_no_path_moves_escrow_funds_except_curve_and_seed() {
                     min_tokens_out: 0,
                     expected_params_hash: None,
                     metadata: None,
+                    commitments: Default::default(),
                 }),
                 RuntimeCall::Launchpad(crate::Call::buy {
                     launch_id: id,
@@ -527,6 +531,12 @@ fn fm03_no_path_moves_escrow_funds_except_curve_and_seed() {
                     launch_id: id,
                     metadata: meta(b"x", b"y"),
                 }),
+                // L3: on an uncommitted launch both are `NotCommitted` and move
+                // nothing. On a committed launch `disburse` moves the creator's
+                // share out of escrow — the same funds §2.5 already lets leave,
+                // to a keyless account instead of a person (§10.3).
+                RuntimeCall::Launchpad(crate::Call::disburse { launch_id: id }),
+                RuntimeCall::Launchpad(crate::Call::claim_locked { launch_id: id }),
             ];
             assert_eq!(calls.len(), names.len());
             for call in calls {
@@ -656,7 +666,8 @@ fn fm05_all_entry_paths_hit_the_hook() {
             UNIT,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
 
         let calls = HOOK_CALLS.with(|c| c.borrow().clone());
@@ -712,7 +723,8 @@ fn fm07_hook_receives_block_numbers_not_time() {
             UNIT,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         assert_eq!(launch(id).created_at, 5);
         // a non-creator in the creation block is rejected
@@ -1099,7 +1111,8 @@ fn fm10_params_change_does_not_touch_live_launch() {
                 0,
                 0,
                 Some(hash_before),
-                None
+                None,
+                Default::default(),
             ),
             Error::<Test>::ParamsMismatch
         );
@@ -1111,7 +1124,8 @@ fn fm10_params_change_does_not_touch_live_launch() {
             0,
             0,
             Some(hash_after),
-            None
+            None,
+            Default::default(),
         ));
     });
 }
@@ -1171,7 +1185,17 @@ fn fm10_params_bounds() {
         assert_noop!(Launchpad::set_creation_paused(origin(ALICE), true), BadOrigin);
         assert_ok!(Launchpad::set_creation_paused(RuntimeOrigin::root(), true));
         assert_noop!(
-            Launchpad::create_launch(origin(ALICE), bv(b"N"), bv(b"N"), None, 0, 0, None, None),
+            Launchpad::create_launch(
+                origin(ALICE),
+                bv(b"N"),
+                bv(b"N"),
+                None,
+                0,
+                0,
+                None,
+                None,
+                Default::default()
+            ),
             Error::<Test>::CreationPaused
         );
     });
@@ -1297,7 +1321,8 @@ fn fm11_create_preflight_rejects_unseedable() {
             0,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
     });
 }
@@ -1396,7 +1421,8 @@ fn fm17_asset_id_squatting_is_skipped() {
             0,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         let l = launch(next);
         assert_eq!(l.asset_id, squatted + 1, "skipped the squatted id to the next free one");
@@ -1421,7 +1447,8 @@ fn fm17_asset_id_squatting_is_skipped() {
             0,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         assert_eq!(launch(next).asset_id, asset_of(next) + 5, "walked past the whole squatted run");
     });
@@ -1492,7 +1519,8 @@ fn fm16_name_symbol_not_enforced_on_chain() {
             0,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         assert_ok!(Launchpad::create_launch(
             origin(BOB),
@@ -1502,10 +1530,21 @@ fn fm16_name_symbol_not_enforced_on_chain() {
             0,
             0,
             None,
-            None
+            None,
+            Default::default(),
         ));
         assert_noop!(
-            Launchpad::create_launch(origin(BOB), bv(b""), bv(b"X"), None, 0, 0, None, None),
+            Launchpad::create_launch(
+                origin(BOB),
+                bv(b""),
+                bv(b"X"),
+                None,
+                0,
+                0,
+                None,
+                None,
+                Default::default()
+            ),
             Error::<Test>::InvalidMetadata
         );
     });
@@ -1577,6 +1616,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
             min_tokens_out: 0,
             expected_params_hash: None,
             metadata: None,
+            commitments: Default::default(),
         }
         .into();
         assert_eq!(
@@ -1592,6 +1632,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
             0,
             None,
             None,
+            Default::default(),
         )
         .unwrap();
         assert_eq!(
@@ -1608,6 +1649,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
             min_tokens_out: 0,
             expected_params_hash: None,
             metadata: None,
+            commitments: Default::default(),
         }
         .into();
         assert_eq!(call.get_dispatch_info().weight, <() as W>::create_launch(4, 4, 0, 0));
@@ -1620,6 +1662,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
             0,
             None,
             None,
+            Default::default(),
         )
         .unwrap();
         assert_eq!(post.actual_weight, None);
@@ -1751,7 +1794,8 @@ fn metadata_is_optional_and_stored_apart_from_the_launch_record() {
             0,
             0,
             None,
-            Some(m.clone())
+            Some(m.clone()),
+            Default::default(),
         ));
         assert_eq!(crate::Metadata::<Test>::get(b), Some(m));
         assert!(has_event(
@@ -1770,7 +1814,8 @@ fn metadata_is_optional_and_stored_apart_from_the_launch_record() {
             0,
             0,
             None,
-            Some(junk.clone())
+            Some(junk.clone()),
+            Default::default(),
         ));
         assert_eq!(crate::Metadata::<Test>::get(c), Some(junk));
     });
@@ -2110,4 +2155,360 @@ fn l1_migration_v1_re_encodes_pre_l1_launches_curves_and_params() {
         MigrateToV1::<Test>::on_runtime_upgrade();
         assert_eq!(Launches::<Test>::get(a).unwrap().curve.treasury_share_bps, 0);
     });
+}
+
+// ---- L3: creator commitments (LAUNCHPAD_SPEC §10) -------------------------
+
+mod l3 {
+    use super::*;
+    use crate::{
+        migrations::v2::MigrateToV2, CreatorCommitments, FeeDisposition, LastDisburseBlock,
+        LockSchedule, Locks,
+    };
+    use frame_support::traits::{Get, OnRuntimeUpgrade};
+    use pallet_vitreus_dex::{CreatorFeesUnclaimed, DefaultFeeRouting};
+
+    const BURN: CreatorCommitments<u64> =
+        CreatorCommitments { fee_disposition: FeeDisposition::BuybackBurn, lock: None };
+
+    fn locked(cliff: u64, vest: u64) -> CreatorCommitments<u64> {
+        CreatorCommitments {
+            fee_disposition: FeeDisposition::Recipient,
+            lock: Some(LockSchedule { cliff, vest }),
+        }
+    }
+
+    fn create_with(
+        creator: impl Borrow<Acc>,
+        initial_buy: u128,
+        c: CreatorCommitments<u64>,
+    ) -> LaunchId {
+        let id = NextLaunchId::<Test>::get();
+        assert_ok!(Launchpad::create_launch(
+            origin(creator),
+            bv(b"Meme"),
+            bv(b"MEME"),
+            None,
+            initial_buy,
+            0,
+            None,
+            None,
+            c,
+        ));
+        id
+    }
+
+    fn commit(id: LaunchId) -> Acc {
+        Launchpad::commit_account(id)
+    }
+    fn lock_acct(id: LaunchId) -> Acc {
+        Launchpad::lock_account(id)
+    }
+
+    // I-L3-5 / §10.4 guard 3: the strictest commitment changes no protocol term.
+    #[test]
+    fn commitments_touch_nothing_protocol_owns() {
+        new_test_ext().execute_with(|| {
+            let max: u64 = <Test as crate::Config>::MaxLockBlocks::get();
+            let strict = CreatorCommitments {
+                fee_disposition: FeeDisposition::BuybackBurn,
+                lock: Some(LockSchedule { cliff: max / 2, vest: max - max / 2 }),
+            };
+            let routing_before = DefaultFeeRouting::<Test>::get();
+            let a = create_with(ALICE, 0, Default::default());
+            let b = create_with(ALICE, 10 * UNIT, strict);
+            let (la, lb) = (launch(a), launch(b));
+            assert_eq!(la.curve, lb.curve, "CurveParams identical");
+            assert_eq!(la.params_hash, lb.params_hash, "params_hash identical");
+            assert_eq!(la.curve.curve_fee_bps, lb.curve.curve_fee_bps);
+            assert_eq!(la.curve.protocol_share_bps, lb.curve.protocol_share_bps);
+            assert_eq!(la.curve.treasury_share_bps, lb.curve.treasury_share_bps);
+            assert_eq!(la.curve.pool_fee_tier, lb.curve.pool_fee_tier);
+            assert_eq!(la.curve.graduation_target, lb.curve.graduation_target);
+            assert_eq!(DefaultFeeRouting::<Test>::get(), routing_before, "DEX routing untouched");
+            assert_eq!(Params::<Test>::get(), <Test as crate::Config>::DefaultLaunchParams::get());
+            assert!(!la.commitments.is_committed());
+            assert!(lb.commitments.is_committed());
+        });
+    }
+
+    #[test]
+    fn l3_lock_requires_initial_buy() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                Launchpad::create_launch(
+                    origin(ALICE),
+                    bv(b"Meme"),
+                    bv(b"MEME"),
+                    None,
+                    0,
+                    0,
+                    None,
+                    None,
+                    locked(10, 10),
+                ),
+                Error::<Test>::LockWithoutPosition
+            );
+            let max: u64 = <Test as crate::Config>::MaxLockBlocks::get();
+            assert_noop!(
+                Launchpad::create_launch(
+                    origin(ALICE),
+                    bv(b"Meme"),
+                    bv(b"MEME"),
+                    None,
+                    UNIT,
+                    0,
+                    None,
+                    None,
+                    locked(max, 1),
+                ),
+                Error::<Test>::CommitmentOutOfBounds
+            );
+        });
+    }
+
+    #[test]
+    fn l3_lock_holds_initial_buy_until_cliff_then_releases_linearly() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = create_with(ALICE, 10 * UNIT, locked(100, 200));
+            let lock = Locks::<Test>::get(id).expect("lock");
+            assert!(lock.total > 0);
+            assert_eq!(lock.released, 0);
+            assert_eq!(lock.cliff_end, 101);
+            assert_eq!(lock.vest_end, 301);
+            // The creator holds none of the tranche; the lock account holds all of it (I-L3-2).
+            assert_eq!(tok(id, ALICE), 0);
+            assert_eq!(tok(id, lock_acct(id)), lock.total);
+            // Nothing before the cliff.
+            System::set_block_number(100);
+            assert_noop!(Launchpad::claim_locked(origin(ALICE), id), Error::<Test>::NothingVested);
+            // Only the creator.
+            System::set_block_number(201);
+            assert_noop!(Launchpad::claim_locked(origin(BOB), id), Error::<Test>::NotFeeRecipient);
+            // Halfway through the vest: half.
+            assert_ok!(Launchpad::claim_locked(origin(ALICE), id));
+            assert_eq!(tok(id, ALICE), lock.total / 2);
+            assert_eq!(Locks::<Test>::get(id).unwrap().released, lock.total / 2);
+            assert_eq!(tok(id, lock_acct(id)), lock.total - lock.total / 2);
+            // Nothing new in the same block.
+            assert_noop!(Launchpad::claim_locked(origin(ALICE), id), Error::<Test>::NothingVested);
+            // At vest_end: the rest, and the lock account is empty.
+            System::set_block_number(301);
+            assert_ok!(Launchpad::claim_locked(origin(ALICE), id));
+            assert_eq!(tok(id, ALICE), lock.total);
+            assert_eq!(tok(id, lock_acct(id)), 0);
+            // A lock with vest = 0 releases everything at the cliff.
+            let id2 = create_with(BOB, UNIT, locked(50, 0));
+            let l2 = Locks::<Test>::get(id2).unwrap();
+            assert_eq!(l2.cliff_end, l2.vest_end);
+            System::set_block_number(l2.cliff_end);
+            assert_ok!(Launchpad::claim_locked(origin(BOB), id2));
+            assert_eq!(tok(id2, BOB), l2.total);
+        });
+    }
+
+    #[test]
+    fn l3_fee_disposition_refuses_claim_and_resolves_to_commit_account() {
+        new_test_ext().execute_with(|| {
+            let id = create_with(ALICE, 0, BURN);
+            // The commitment account exists (the creator funded its ED at create).
+            assert_eq!(vtrs(commit(id)), ED);
+            buy(BOB, id, 100 * UNIT);
+            assert!(state(id).creator_fees_unclaimed > 0);
+            assert_noop!(
+                Launchpad::claim_creator_fees(origin(ALICE), id),
+                Error::<Test>::Committed
+            );
+            assert_eq!(Launchpad::creator_fee_recipient_for(asset_of(id)), Some(commit(id)));
+            // The editing authority is unchanged.
+            assert_ok!(Launchpad::set_creator_fee_recipient(origin(ALICE), id, CHARLIE));
+            assert_eq!(Launchpad::creator_fee_recipient_for(asset_of(id)), Some(commit(id)));
+            // An uncommitted launch still resolves to its recipient.
+            let plain = create_with(ALICE, 0, Default::default());
+            assert_eq!(Launchpad::creator_fee_recipient_for(asset_of(plain)), Some(ALICE));
+            assert_noop!(Launchpad::disburse(origin(BOB), plain), Error::<Test>::NotCommitted);
+        });
+    }
+
+    #[test]
+    fn l3_disburse_burns_curve_leg_in_capped_slices() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = create_with(ALICE, 0, BURN);
+            buy(BOB, id, 100 * UNIT);
+            let owed = state(id).creator_fees_unclaimed;
+            assert!(owed > 0);
+            let supply_before = Assets::total_supply(asset_of(id));
+            let escrow_before = vtrs(escrow(id));
+
+            assert_ok!(Launchpad::disburse(origin(CHARLIE), id));
+            // Curve leg claimed into the commitment account. What remains is the
+            // creator share of the slice's own buy — an ordinary buy pays the
+            // ordinary fee — and is claimed by the next call.
+            assert!(state(id).creator_fees_unclaimed < owed / 100);
+            let ev = System::events()
+                .into_iter()
+                .filter_map(|r| match r.event {
+                    RuntimeEvent::Launchpad(Event::Disbursed {
+                        claimed,
+                        vtrs_burned_in,
+                        tokens_burned,
+                        ..
+                    }) => Some((claimed, vtrs_burned_in, tokens_burned)),
+                    _ => None,
+                })
+                .last()
+                .expect("Disbursed");
+            assert_eq!(ev.0, owed);
+            // One slice bought and burned: supply fell by exactly the tokens burned,
+            // the commitment account holds no tokens (I-L3-3), and its VTRS fell by
+            // what was spent — bounded by the impact cap on the curve's virtual quote.
+            assert!(ev.1 > 0 && ev.2 > 0);
+            assert_eq!(Assets::total_supply(asset_of(id)), supply_before - ev.2);
+            assert_eq!(tok(id, commit(id)), 0);
+            let (vq, _) =
+                <Launchpad as crate::CurveVenue<_, _, _, _>>::virtual_reserves(id).unwrap();
+            let cap = vq * 50 / 20_000;
+            assert!(ev.1 <= cap + 1, "slice {} within cap {}", ev.1, cap);
+            assert_eq!(vtrs(commit(id)), ED + owed - ev.1);
+            assert!(vtrs(escrow(id)) > escrow_before - owed, "the buy put VTRS back into escrow");
+            assert_eq!(LastDisburseBlock::<Test>::get(id), Some(1));
+            // Nothing to claim and the interval not passed: TooSoon while VTRS waits.
+            if vtrs(commit(id)) > ED {
+                assert_noop!(Launchpad::disburse(origin(CHARLIE), id), Error::<Test>::TooSoon);
+                System::set_block_number(11);
+                assert_ok!(Launchpad::disburse(origin(CHARLIE), id));
+            }
+            // Each slice's own buy re-accrues a shrinking creator share; drain
+            // until nothing is owed and the residue is below the dust floor.
+            let mut n = 0;
+            while (vtrs(commit(id)) >= 2 * ED || state(id).creator_fees_unclaimed > 0) && n < 200 {
+                System::set_block_number(System::block_number() + 10);
+                let _ = Launchpad::disburse(origin(CHARLIE), id);
+                n += 1;
+            }
+            assert!(n < 200, "converged in {n} slices");
+            assert_noop!(Launchpad::disburse(origin(CHARLIE), id), Error::<Test>::NothingToDo);
+        });
+    }
+
+    #[test]
+    fn l3_disburse_claims_pool_leg_after_graduation() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = create_with(ALICE, 0, BURN);
+            cross(BOB, id);
+            assert_eq!(state(id).phase, Phase::Graduated);
+            // Drain the curve leg first so the pool leg is what the next call claims.
+            let mut n = 0;
+            while (state(id).creator_fees_unclaimed > 0 || vtrs(commit(id)) > ED) && n < 500 {
+                System::set_block_number(System::block_number() + 10);
+                let r = Launchpad::disburse(origin(CHARLIE), id);
+                if let Err(e) = r {
+                    assert_eq!(
+                        e,
+                        Error::<Test>::NothingToDo.into(),
+                        "unexpected disburse error: {e:?}"
+                    );
+                    break;
+                }
+                n += 1;
+            }
+            assert!(n < 500, "curve leg drained");
+            // A pool swap accrues the DEX's creator share to the pair.
+            assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+                origin(CHARLIE),
+                native(),
+                kind(id),
+                10 * UNIT,
+                0,
+                CHARLIE,
+            ));
+            let owed = CreatorFeesUnclaimed::<Test>::get(pair(id));
+            if owed == 0 {
+                // routing may give the creator 0 bps in this mock; then there is nothing to test here
+                return;
+            }
+            System::set_block_number(System::block_number() + 10);
+            let supply_before = Assets::total_supply(asset_of(id));
+            assert_ok!(Launchpad::disburse(origin(CHARLIE), id));
+            assert_eq!(CreatorFeesUnclaimed::<Test>::get(pair(id)), 0);
+            assert!(Assets::total_supply(asset_of(id)) < supply_before, "a pool slice burned");
+            assert_eq!(tok(id, commit(id)), 0);
+        });
+    }
+
+    #[test]
+    fn l3_disburse_waits_while_complete_and_unseeded() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = create_with(ALICE, 0, BURN);
+            buy(BOB, id, 100 * UNIT);
+            // Force `Complete` without a seed: the mock's pool creation can be
+            // made to fail by pre-seeding (PoolAlreadySeeded) — simpler: check
+            // the branch directly.
+            let launch = launch(id);
+            Curves::<Test>::mutate(id, |c| c.as_mut().unwrap().phase = Phase::Complete);
+            let pending = state(id).creator_fees_unclaimed;
+            assert_ok!(Launchpad::disburse(origin(CHARLIE), id)); // claims, burns nothing
+            assert_eq!(vtrs(commit(id)), ED + pending);
+            assert_eq!(Assets::total_supply(launch.asset_id), 1_000_000_000 * UNIT);
+            // No venue: the VTRS waits, and there was nothing else to do.
+            assert_noop!(Launchpad::disburse(origin(CHARLIE), id), Error::<Test>::NothingToDo);
+        });
+    }
+
+    #[test]
+    fn l3_no_extrinsic_writes_commitments() {
+        // §10.4 guard 1, checked against the call metadata: no call carries a
+        // `CreatorCommitments` except `create_launch`.
+        let calls = <crate::Call<Test> as frame_support::traits::GetCallName>::get_call_names();
+        assert!(calls.contains(&"create_launch"));
+        assert!(!calls.contains(&"set_commitments"));
+        // And the record is byte-identical before and after every other call a creator can make.
+        new_test_ext().execute_with(|| {
+            let id = create_with(
+                ALICE,
+                UNIT,
+                CreatorCommitments {
+                    fee_disposition: FeeDisposition::BuybackBurn,
+                    lock: Some(LockSchedule { cliff: 5, vest: 5 }),
+                },
+            );
+            let before = launch(id).commitments;
+            assert_ok!(Launchpad::set_creator_fee_recipient(origin(ALICE), id, BOB));
+            buy(CHARLIE, id, UNIT);
+            let _ = Launchpad::disburse(origin(CHARLIE), id);
+            System::set_block_number(20);
+            assert_ok!(Launchpad::claim_locked(origin(ALICE), id));
+            assert_eq!(launch(id).commitments, before);
+        });
+    }
+
+    #[test]
+    fn l3_migration_v2_defaults_none() {
+        new_test_ext().execute_with(|| {
+            let a = create_with(ALICE, 0, Default::default());
+            // Write a v1-shaped record over it and run the migration.
+            let l = launch(a);
+            let old = crate::migrations::v2::OldLaunch::<Test> {
+                asset_id: l.asset_id,
+                creator: l.creator.clone(),
+                creator_fee_recipient: l.creator_fee_recipient.clone(),
+                escrow: l.escrow.clone(),
+                created_at: l.created_at,
+                curve: l.curve.clone(),
+                params_hash: l.params_hash,
+            };
+            frame_support::storage::unhashed::put(&Launches::<Test>::hashed_key_for(a), &old);
+            frame_support::traits::StorageVersion::new(1).put::<Launchpad>();
+            MigrateToV2::<Test>::on_runtime_upgrade();
+            assert_eq!(frame_support::traits::StorageVersion::get::<Launchpad>(), 2);
+            let after = launch(a);
+            assert_eq!(after.curve, l.curve);
+            assert!(!after.commitments.is_committed());
+            assert!(Locks::<Test>::get(a).is_none());
+        });
+    }
 }

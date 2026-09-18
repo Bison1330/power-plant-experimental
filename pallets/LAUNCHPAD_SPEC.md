@@ -168,6 +168,7 @@ There is no per-user storage. Token holdings are `pallet_assets` balances.
 | `S`, `SELLABLE`, `RESERVED`, `VT_FLOOR` | runtime constants; hashed into `params_hash` | |
 | Treasury account | | ✔ (`T::Treasury`) |
 | Rescue delay | | ✔ (`T::RescueDelay` constant) |
+| Creator commitments (§10) | ✔ (in `Launch.commitments`; creator's, not the protocol's — their intersection with the terms above is empty by construction) | |
 
 ### 1.5 Config
 
@@ -818,3 +819,115 @@ These are the constraints, recorded because each one is where a naive version fa
 - Buy-and-burn only, or holder distribution with a lock? If the latter, the lock is a v2 feature in its own right (it changes what holding the token means).
 - Slashing: a validator slash reduces the treasury. Is that acceptable as-is (it is the honest consequence of staking) or does uniform validator selection need a slash-history filter?
 - Interaction with D4's creator share: does a treasury share come out of the protocol slice, the creator slice, or the pool's own fee? Each changes who pays for the loop.
+
+---
+
+## 10. Creator commitments — committed supply, not a committed person (L3)
+
+**Status:** designed 2026-09-18, implemented on `pallets/launch-treasury` as L3 (this section is the spec; §10.9 records where the code departs). **Depends on:** nothing in D9, L1/L2 or review findings R1–R7; it does not enter the reviewed fee-routing paths (§10.8).
+
+### 10.1 Principle
+
+Uniform terms (§1.1, §1.4) are the protocol's and are not negotiable: every launch on the pad carries the same curve, the same fee, the same split, the same treasury slice. A commitment is something a creator adds **on top**, at `create_launch`, that binds a quantity the creator hands to the pallet — a stream of fees or a tranche of tokens — and that no call can afterwards loosen. The pallet enforces it; nobody has to be trusted to keep it; nobody can switch it off. That asymmetry against an off-chain bot (Bags' DividendsBot can be stopped by whoever runs it) is the whole product.
+
+What a commitment is **not**: a constraint on a person. The pallet sees one signer; a launch is typically a bundle of many wallets. So every commitment is stated, stored and displayed as *what supply is bound* — "N tokens are held by the pallet until block B", "this launch's creator-fee stream is bought back and burned" — and never as "the creator cannot sell". A lock chip that a buyer reads as "the dev can't dump" is a better Unicrypt badge, not an honest one. §10.6 makes this a display rule.
+
+### 10.2 The type
+
+```rust
+/// Creator-bound. Snapshotted into `Launch` at create; no extrinsic writes
+/// it afterwards. Every field's default is "no commitment" and every
+/// non-default value binds further. Nothing in here names a protocol term
+/// (§10.4, guard 2).
+#[derive(Default, ...)]
+pub struct CreatorCommitments<BlockNumber> {
+    pub fee_disposition: FeeDisposition,       // Recipient (default) | BuybackBurn
+    pub lock: Option<LockSchedule<BlockNumber>>, // None (default) | { cliff, vest }
+}
+
+pub enum FeeDisposition { #[default] Recipient, BuybackBurn }
+
+/// Applies to the tokens the creator's `initial_buy` receives.
+pub struct LockSchedule<BlockNumber> {
+    /// Blocks after create during which nothing is released.
+    pub cliff: BlockNumber,
+    /// Blocks after the cliff over which the tranche releases linearly; 0 = all at the cliff.
+    pub vest: BlockNumber,
+}
+```
+
+`Launch` gains `pub commitments: CreatorCommitments<BlockNumberFor<T>>` (migration v1 → v2: existing launches get `Default`, i.e. none — §10.10).
+
+Bounds, checked in `create_launch` and reject-only (`CommitmentOutOfBounds`): `cliff + vest ≤ MaxLockBlocks` (constant, 2 years); a `lock` with `initial_buy == 0` is rejected (`LockWithoutPosition`) — a lock must bind something. Validation never rewrites a value; there is no value the pallet computes on the creator's behalf.
+
+### 10.3 The two commitments
+
+**Fee disposition `BuybackBurn`.** The launch's creator-fee share — on both legs, the curve's `creator_fees_unclaimed` and the pool's `CreatorFeesUnclaimed` in the DEX — is never paid to a person. It is claimed into a pallet-derived *commitment account* for the launch (`CommitPalletId.into_sub_account_truncating(id)`, existentially funded by the creator at create) and spent buying the token on its own venue and burning what it buys.
+
+- `creator_fee_recipient_for(asset)` (the DEX's `CreatorFeeRecipient` resolver, §5.2) returns the commitment account for a committed launch. The DEX's routing, its bound and `claim_pool_creator_fees` are untouched; only the answer to "who is the recipient" changes.
+- `claim_creator_fees` (§2.5) fails `Committed` on a committed launch. `set_creator_fee_recipient` (§2.6) and `set_launch_metadata` (§2.9) still work — `creator_fee_recipient` keeps its role as the launch's editing authority — but fees never reach that address.
+- `disburse(launch_id)` (anyone, §10.5) moves both legs' unclaimed creator fees into the commitment account and burns one capped slice: on the curve while `Trading`, on the pool once `Graduated`, nothing while `Complete` and unseeded. Slices are bounded exactly as the treasury's (LAUNCH_TREASURY_SPEC §6.4): `y = min(pending, reserve_vtrs × MaxBurnImpactBps / (2 × BPS))`, one per `MinBurnInterval` blocks, no `min_out`, what was spent is measured not assumed, the tokens received are `burn_from`'d in the same call. `MaxBurnImpactBps` and `MinBurnInterval` are pallet **constants**, not `Params` — they bound a keeper's call, and making them terms would create a protocol knob a commitment could be seen to touch.
+- Nothing is paid to the caller. There is no bounty in L3; the frontend and the pad's keeper call `disburse`, and so may anyone.
+
+**Lock.** The tokens the creator's `initial_buy` receives are moved, in the same `create_launch`, from the creator to a pallet-derived *lock account* (`LockPalletId.into_sub_account_truncating(id)`, existentially funded by the creator at create — a non-sufficient asset needs a provider) and recorded as `LockState { total, released, cliff_end, vest_end }`. `claim_locked(launch_id)` (creator only) releases `total × min(1, (now − cliff_end) / (vest_end − cliff_end)) − released` to the creator; nothing before `cliff_end`. No other call moves the lock account's tokens; it has no key.
+
+What the lock binds is the initial buy and nothing else. Tokens bought by other wallets in the same block are not bound, and the pallet cannot know they exist. The record therefore stores an amount, and the display shows an amount and a share of supply — never the creator's name in the same sentence as "cannot".
+
+Folded in and dropped: a *sell cap* and a *delayed first sale* are the vest and the cliff of this schedule applied to the locked tranche; as separate items they would bind freely transferable balance, which `pallet_assets` cannot do without a transfer hook, and would be defeated by one transfer. A *stake-duration fee stream* was designed and is not built (its lineage is M3M3).
+
+### 10.4 Three guards: commitments never touch protocol terms
+
+1. **No setter.** `CreatorCommitments` is a field of `Launch` (§1.2, "immutable after create"). No extrinsic takes a `CreatorCommitments` or a `LockSchedule`, and none writes `Launch.commitments`. A frontend can prove it from metadata the way `/treasury` proves "no exit": list the pallet's calls; none carries the type.
+2. **Disjoint types.** `CreatorCommitments` has no field whose meaning appears in `LaunchParams` or `CurveParams`: no bps, no target, no share, no fee, no tier. `create_launch` snapshots `curve` from `Params` *before* it looks at the commitments, and validates the commitments in a function whose only input is `&CreatorCommitments` — it cannot see a protocol term to loosen. A commitment cannot say "and my creator share is 60 %" because there is no field in which to say it.
+3. **A test that goes red if anyone adds one.** `commitments_touch_nothing_protocol_owns` creates two launches in one externalities, one with `Default` commitments and one with the strictest expressible (`BuybackBurn` + a maximal lock), and asserts `Launch.curve`, `Launch.params_hash`, `CurveParams.treasury_share_bps`, `protocol_share_bps`, `curve_fee_bps`, `pool_fee_tier` and the DEX's `DefaultFeeRouting` are byte-identical between them. Any future change that makes a protocol quantity depend on a commitment fails this test.
+
+The rule in one line, for §1.4: *uniform terms are the protocol's; commitments are the creator's; their intersection is empty by construction.*
+
+### 10.5 Extrinsics
+
+| Call | Origin | Effect |
+|---|---|---|
+| `create_launch(…, commitments)` | creator | gains one argument. With `BuybackBurn`: funds the commitment account's ED from the creator. With `lock`: after the initial buy, moves the tokens received to the lock account and writes `LockState`. Both are atomic with the rest of create. |
+| `disburse(launch_id)` | anyone | committed launches only (`NotCommitted` otherwise). Curve leg: `creator_fees_unclaimed → 0`, escrow → commitment account. Pool leg (graduated): if the DEX's `CreatorFeesUnclaimed[pair] > 0`, dispatch `claim_pool_creator_fees` as `Signed(commitment account)`. Then one burn slice if `pending > 0` and the interval has passed. `NothingToDo` if none of the three did anything. |
+| `claim_locked(launch_id)` | creator | releases the vested amount; `NothingVested` if zero. |
+
+Existing calls: `claim_creator_fees` → `Committed` on a committed launch. Nothing else changes.
+
+### 10.6 Display rules
+
+The distinction the page must make visible is **written by the pallet vs. written by the creator**. `Metadata` is `set_launch_metadata`: editable at any time by the fee recipient and "stored and returned verbatim, nothing validated" (§2.9). Commitments are the opposite, and the copy says so.
+
+- **Board row:** one chip after the phase badge, derived from `Launch.commitments` and the live `LockState` — never from metadata text. `fees burn` for `BuybackBurn`; `N % locked → block B` for a lock (share of *total supply* still held, and the block it fully releases). Neither chip for `Recipient` + no lock.
+- **Token page, "Commitments" card**, in the same fact-under-sentence pattern as `/treasury` §3. *Fees:* "This launch's creator fees buy back and burn TOKEN. Set at creation; the pallet has no call that changes it." Fact: the commitment account, its nonce (0 — the pallet dispatches as it, nothing signs as it), VTRS burned in, tokens burned, last `Disbursed`. *Lock:* "N TOKEN (x % of supply) are held by the pallet until block B, then release over D blocks." Fact: the lock account, its balance, `released` so far, next release block.
+- **The sentence that does the work, once, on the card:** *"Claims in the description can be edited by the creator at any time. The two commitments above cannot: they are fields of the launch record and no call writes them. A lock binds these tokens; it says nothing about tokens in other wallets."*
+- **Never:** "dev locked", "creator can't sell", "team tokens", or any phrasing that names a person as the thing bound. The bound thing is a number of tokens or a stream of fees.
+- **Creator card:** the creator's committed launches as facts ("2 of 3 launches with fees burned; 1 with 10 % locked"), so a track record survives pseudonymity.
+
+### 10.7 Invariants and tests
+
+- I-L3-1: for a committed launch, `Launch.commitments` never changes after `LaunchCreated` (no writer exists; `try_state` compares against a hash recorded at create).
+- I-L3-2: `LockState.released ≤ LockState.total`; lock account token balance `== total − released`.
+- I-L3-3: the commitment account's token balance is zero after every `disburse` (bought tokens are burned in the same call); its VTRS never decreases except by a venue buy.
+- I-L3-4: `claim_creator_fees` on a committed launch fails and moves nothing.
+- I-L3-5 (guard 3): `commitments_touch_nothing_protocol_owns`.
+
+Tests: `l3_lock_holds_initial_buy_until_cliff`, `l3_lock_releases_linearly`, `l3_lock_requires_initial_buy`, `l3_fee_disposition_refuses_claim`, `l3_disburse_burns_curve_leg`, `l3_disburse_burns_pool_leg_after_graduation`, `l3_disburse_respects_cap_and_interval`, `l3_disburse_waits_while_complete_unseeded`, `l3_no_extrinsic_writes_commitments` (metadata scan), `l3_migration_v2_defaults_none`, plus I-L3-5.
+
+### 10.8 What it does not touch
+
+The DEX's D4/D9 routing struct, `treasury_bps`, the `MAX_ROUTED_BPS` bound, `claim_pool_creator_fees`, the launchpad's fee split in `do_buy`/`do_sell`, and every path named in REVIEW_2026-09-17 R1–R7. The only DEX-facing change is the value `creator_fee_recipient_for` returns. If implementation finds it needs more than that, it stops.
+
+### 10.9 Cost and departures
+
+Storage: `commitments` in `Launch` (a few bytes; v2 migration); `Locks: StorageMap<LaunchId, LockState>`; `LastDisburseBlock: StorageMap<LaunchId, Option<BlockNumber>>`. Constants: `CommitPalletId`, `LockPalletId`, `MaxLockBlocks`, `MaxBurnImpactBps`, `MinBurnInterval`. Calls: two new, one argument added. Benchmarks: `disburse` (curve branch; the pool branch shares its shape), `claim_locked`; `create_launch` gains the lock transfer in its worst case. Weights for the two new calls are placeholders until the runbook (`BENCHMARKING.md`) is run.
+
+Departures, as implemented:
+
+- **Both commitment accounts are existentially funded by the creator at create**, not only the fee account: `pallet_assets` will not open a non-sufficient asset account for an account with no provider, so the lock account needs an ED before it can receive the tranche. Two EDs, from the creator, refunded to nobody (the accounts persist).
+- **`LastDisburseBlock` is `Option`**: the first slice of a launch is never `TooSoon`; the interval applies between slices.
+- **The lock transfer is `Expendable` on the creator's side**: the whole initial-buy tranche moves, and an emptied asset account may be reaped. Nothing else of the creator's is touched.
+- **Error names:** `NotFeeRecipient` is reused for `claim_locked`'s "not the creator" (one origin error per pallet), and `NotCommitted` covers both "no fee commitment" (`disburse`) and "no lock" (`claim_locked`).
+
+### 10.10 Migration L3 (v1 → v2)
+
+`Launches` re-encoded with `commitments: Default::default()`. `Locks` and `LastDisburseBlock` start empty. No existing launch becomes committed; a commitment exists only if it was made at create.
