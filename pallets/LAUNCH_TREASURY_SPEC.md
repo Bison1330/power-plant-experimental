@@ -540,3 +540,93 @@ A treasury slice proportional to the locked fraction of the LP converges to the 
 ### 11.5 What was done
 
 `set_default_fee_routing(5, 5, 20)` on the dev chain, sudo, finalized at block 844,554 on 2026-09-18 (spec 225). It costs no constituency and doubles the principal. Routing is snapshotted into `PoolInfo` at seed, so it applies to pools seeded from that block on; the four pools existing at the time keep their snapshots (all 0/0/0 — they predate D4's defaults). The curve leg's `treasury_share_bps` (2,500 → up to 5,000 with the protocol's share to 0) was left as is until the spend side is decided.
+
+---
+
+## 12. Proposed successor to §2.4 — pooled yield, per-launch principal (2026-09-18)
+
+**Status:** proposed, not built. It changes `harvest` and `compound` in this pallet, which is under review (experimental #2), and it interacts with where principal goes (§2.4's retirement burn, or redemption — waiting on counsel). Both land before this code moves. This section exists so the two arguments that justify the design — the wash break-even (§12.3) and the timing argument (§12.4) — survive in a form someone can check.
+
+### 12.1 The design in one paragraph
+
+Principal stays exactly as it is: every launch's fee slice is its own, tracked as shares of the pooled stake (§5.2), returned to its holders by whatever §2.4 becomes. What changes is the **yield**. Today LNRG is attributed to launches by their shares and each launch buys back its own token with its own yield (§6.3–6.4) — 2 bps of its lifetime volume per year, mostly after it is dead. Under this proposal the LNRG of the *whole* stake is one pot per window, allocated among the launches that traded in that window in proportion to what each contributed, **capped at 1.25× its contribution**, with the unallocated remainder re-bonded as pad-level principal. A dead token contributes nothing and receives nothing; a token draws from the pad's entire accumulated stake from its first trade, for as long as it trades. Its principal remains its holders'.
+
+### 12.2 Mechanism
+
+Let a *window* be `WindowBlocks` (term; 100,800 = 7 days at 6 s). For window `w` and launch `i`:
+
+- `C_i(w)` — VTRS the treasury received from launch `i` during `w`, both legs. `note_fee` already records this per launch and per block; it is summed into `WindowContribution[w][i]` and `WindowTotal[w]` at intake (one more write on the trade path, same key shape as `pending`).
+- `Y(w)` — VTRS realised from selling the LNRG that arrived during `w` (the pot's yield for the window). Sold at the window's close by the first `compound` after it, broker-depth-limited as §6.4 step 2; unsold LNRG rolls into the next window's `Y`.
+- `K_i` — the launch's cap multiple, computed from its own snapshotted terms on the venue it trades on: `K = (fee_bps − creator_bps) / treasury_bps`. On a tier-3 pool at 5 / 5 / 20 routing, `K = (30 − 5) / 20 = 1.25`; on the curve at 100 bps split 50 / 25 / 25, `K = (100 − 50) / 25 = 2`. A governance factor `CapSafety ≤ 1` (term, default 1) multiplies it; §12.3 says why it must not exceed 1.
+- Allocation: `a_i(w) = min( Y(w) · C_i(w) / WindowTotal[w],  K_i · C_i(w) )`.
+- Remainder: `R(w) = Y(w) − Σ a_i(w)` is bonded as principal of a reserved endowment record (`LaunchId::MAX`, no venue, never retired, never redeemable); its future LNRG joins every later `Y`.
+- `compound(launch_id, w)` (anyone) buys and burns `a_i(w)` on the launch's venue in the existing capped slices (§6.4 step 4, unchanged); `Allocated[w][i]` prevents a double claim. Windows older than `WindowHistory` (term; 8) are pruned once fully claimed or their unclaimed allocation is folded into `R`.
+
+`harvest`'s share-based LNRG attribution (`LnrgPerShare`, `lnrg_debt`) goes; shares remain for principal only. Everything else — intake, `stake`, `retarget`, retirement or its successor, the slice cap, the bounty — stays.
+
+### 12.3 Wash-trading break-even (the reason for the cap)
+
+Allocation proportional to window volume is proportional to fees paid, so the attack is to buy the allocation with fees. Let `Y` be the pot's yield for the window, `W` the organic volume of every other launch in the window, `c` the manipulator's net cost per unit of wash volume, and `q` their wash volume on a launch they created (so they keep the creator share). On a tier-3 pool at 5 / 5 / 20: `c = 30 − 5 = 25 bps` plus slippage and MEV on a thin pool, which only raise `c`.
+
+Uncapped, they capture `Y · q / (q + W)` and pay `c · q`:
+
+```
+π(q)  = Y·q/(q+W) − c·q
+q*    = √(Y·W/c) − W
+π(q*) = (√Y − √(c·W))²      valid when q* > 0, i.e. when Y > c·W
+```
+
+`π(q*) > 0` whenever `Y > c·W`, and no profitable `q` exists when `Y ≤ c·W`. So an uncapped pot is attackable exactly when its yield per window exceeds `c` times the pad's organic volume per window — which is exactly when it is large enough to matter. The design's success condition and its attack condition are the same inequality.
+
+With the cap, a launch receives at most `K · C_i = K · treasury_bps · v_i`. Setting `K = c / treasury_bps` makes the cap `c · v_i`: the most any launch can draw in a window is the net fee its own volume paid. For the manipulator, `π(q) ≤ c·q − c·q = 0` for every `q`. Wash is break-even at best, by construction, at every pot size. This is why `K` is derived from the routing and `CapSafety` may only lower it: a `K` above `c / treasury_bps` reopens the inequality.
+
+Two things the derivation does not cover. A manipulator who is not the creator has `c = 30 bps` and is worse off. A manipulator who is the creator *and* whose token the bought-back tokens benefit (they hold supply) recovers part of the buyback through price — bounded by their holding share of a slice-capped, publicly visible buy, and already the case under per-launch accounting.
+
+The other metrics considered and rejected: holder count and unique traders are Sybil-free at an ED of 10⁻⁶ VTRS; time-weighted depth is uniform across launch pools (100 %-locked seed at the same `T`) and its only variable part can be added, counted and removed; an equal split above a threshold is Sybil-linear in the number of tokens the attacker launches. Volume-proportional is the only rule whose cost of manipulation is the fee itself, which is the one cost the pad sets.
+
+### 12.4 The timing argument (the reason to do it at all)
+
+Total yield is conserved between the two designs; what changes is *when in a token's life it arrives*. Per-launch pays a token `0.10 × treasury_bps` of its cumulative volume per year — 2 bps at 20 bps — forever, almost all of it after the token is dead and into a pool nobody is left to sell into.
+
+Pooled, in a pad with steady volume rate `R` per year and `y` years of history: the pot is `treasury_bps × R × y`, its yield `0.10 × treasury_bps × R × y` per year, paid to the year's volume `R`. So each unit of live volume receives **`0.10 × treasury_bps × y` = `2 bps × y` in buybacks during its life**, until the cap binds at `c` (25 bps, i.e. `y = 12.5` years flat, sooner if the pad's volume declines). For a token with turnover `τ` (lifetime volume ÷ graduation mcap):
+
+```
+during-life buyback ÷ graduation mcap  =  2 bps × y × τ
+```
+
+| Pad age `y` | τ = 20 | τ = 100 | τ = 667 |
+|---|---|---|---|
+| 1 | 0.4 % | 2 % | 13 % |
+| 3 | 1.2 % | 6 % | 40 % |
+| 12.5 (cap) | 5 % | 25 % | 167 % |
+
+Against the alternatives for the same τ = 100 token that lives two weeks: per-launch pays **0.08 %** of graduation mcap during its life (2 %/yr × 2/52); tier-10 per-launch (§11.4, D9 code, traders pay 1 %) pays **0.35 %** during its life (9 %/yr × 2/52); pooled at 0.3 % pays **2 % in pad-year one, 6 % in pad-year three.** Pooled wins on during-life buyback from the first year for any token that lives less than a year, which is nearly all of them, and does not touch the trader's fee. The number of launches does not enter; it only sets how lumpy a week's split is, and the cap already bounds a week in which one token is the whole pad.
+
+### 12.5 What the creator and the token page can show
+
+Every figure below is state this pallet already holds or would hold under §12.2; nothing needs the DEX or the indexer.
+
+**The pitch, with its number.** *"From your first trade, the pad's whole stake buys your token back in proportion to your share of the pad's volume."* Under it, from `WindowContribution`, `WindowTotal`, `Y(w)` and `Allocated`:
+
+| Line | From | Example |
+|---|---|---|
+| Pad stake and this week's yield | `ledger.active`, `Y(w)` | "The pad has 300,000 VTRS staked; this week it yielded 577 VTRS." |
+| This token's share | `C_i(w) / WindowTotal[w]` | "TOKEN was 26 % of the pad's fee volume this week." |
+| This week's allocation | `a_i(w)` | "Allocation: 150 VTRS." |
+| Whether the cap bound | `a_i(w) == K_i · C_i(w)` | "Capped at 1.25× what TOKEN contributed (120 VTRS)." — or "Uncapped." |
+| What it bought | `Compounded` events for `(i, w)` | "Bought and burned 9.1M TOKEN so far this week; 30 VTRS still to spend." |
+| The token's principal | `shares × active / TotalShares` | "TOKEN's own stake: 1,500 VTRS, its holders'." — unchanged from today's card |
+
+**Board row:** one column, *Buyback this week*, from `a_i(w)` for the current window, blank for a launch with no contribution. **Creator card:** the same lines for the creator's launches, plus "Capped" as a plain flag, since a creator whose token is capped has hit the one limit the pad imposes and should be told why (§12.3 in one sentence: the cap is the fee their own volume paid).
+
+**What the copy must not say:** "the pad pays you", "yield", "APR". The allocation is a purchase of the token on the open market, funded by the pad's stake, sized by the token's share of the pad's trade. It is not paid to anyone, and the page says so the way `/treasury` does now.
+
+### 12.6 What it touches, and sequencing
+
+`harvest`, `compound`, `note_fee` (one added write), three storage items, two terms, one reserved record — all in this pallet. Not touched: D9, the DEX, the launchpad, the slice cap, R1–R7. Dependencies: (1) experimental #2 lands, since this rewrites `compound`; (2) the principal decision — with §2.4's retirement, dead principal leaves the stake after 90 days and the pot is mostly recent launches; with redemption, dead principal stays until holders take it and the pot is the pad's whole history. The timing argument in §12.4 assumes the latter; under retirement, `y` in the formula is roughly the dormancy period plus the live life, not the pad's age, and the design pays what per-launch would have, only earlier.
+
+### 12.7 Open
+
+- `WindowBlocks`: 7 days smooths a pad with few concurrent live tokens; 1 day tracks a launch's life more closely. Lumpiness vs responsiveness; a governance term either way.
+- The endowment record's principal has no holders. Where it goes if the pad winds down is a governance question, like the vault's own ED today.
+- The curve leg's `K = 2` is higher than the pool's 1.25 because the creator share is larger there; whether to use the pool's `K` for both, conservatively, is a one-line choice.
