@@ -22,12 +22,15 @@ pallets/launch-treasury/         # a slice of every launch-token trade, staked a
 pallets/LAUNCHPAD_SPEC.md        # the launchpad's design, invariants and failure modes
 pallets/LAUNCH_TREASURY_SPEC.md  # the treasury's — and §10.12, where pallet code lives and how consumers pin it
 pallets/REVIEW_2026-09-17.md     # adversarial review of the pallets, with the red tests it produced
+pallets/BENCHMARKING.md          # how weights are measured, inside a consuming runtime; §2.1 is for whoever rebases the wiring
+.maintain/frame-weight-template.hbs  # the weights.rs shape; identical to power-plant's copy
 .github/workflows/ci.yml         # build, test, benchmarks, try-runtime, fmt, clippy — on every commit
 # optional later: thin --dev node / runtime, scripts
 ```
 
 Each pallet carries its tests, its measured `weights.rs`, its benchmarks (which run inside a
-consuming runtime — `power-plant`'s `pallets/BENCHMARKING.md` is the runbook), and its
+consuming runtime — `pallets/BENCHMARKING.md` here is the runbook, and `.maintain/` the weight
+template it uses), and its
 storage migrations as `VersionedMigration`s, so a crate at any commit is right for a fresh
 chain and for one that ran an earlier version.
 
