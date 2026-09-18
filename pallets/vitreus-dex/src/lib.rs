@@ -934,6 +934,31 @@ pub mod pallet {
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
 
+    /// Finding 14, from-genesis path: endow the fee escrow with the native ED so
+    /// it exists before the first swap and every routed protocol/creator slice —
+    /// even one below ED — reaches it rather than being left in the pool. On a
+    /// chain that receives this pallet by upgrade the fork migration does the
+    /// same; the `do_swap` guard makes correctness independent of either.
+    #[pallet::genesis_config]
+    #[derive(frame_support::DefaultNoBound)]
+    pub struct GenesisConfig<T: Config> {
+        /// No configurable fields; the build endows the fee escrow with the ED.
+        #[serde(skip)]
+        pub _marker: core::marker::PhantomData<T>,
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+        fn build(&self) {
+            let native = T::NativeAsset::get();
+            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
+            let escrow = Pallet::<T>::fee_escrow_account();
+            if !frame_system::Pallet::<T>::account_exists(&escrow) {
+                let _ = T::Assets::mint_into(native, &escrow, ed);
+            }
+        }
+    }
+
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// Create a new AMM pool for the given asset pair and fee tier.
@@ -2439,14 +2464,33 @@ pub mod pallet {
                 amount_out,
                 Expendable,
             )?;
+            // Finding 14 (SECURITY_AUDIT): a routed slice below the native ED
+            // cannot create a recipient account that does not exist yet — the
+            // fee escrow before its first fee, or the treasury vault before it is
+            // funded — and pallet-balances fails the transfer, which used to fail
+            // the whole swap with an unreadable `Token(BelowMinimum)`. When a
+            // slice is below ED *and* its recipient has no account, leave that
+            // slice in the pool: it accrues to LPs at the next `sync_reserves`,
+            // exactly as the pool's own fee share does (D7). The consequence,
+            // stated plainly so no later reader treats a routing total as exact:
+            // `ProtocolFeesUnclaimed`, `CreatorFeesUnclaimed` and the sink's
+            // tally do NOT count a sub-ED slice that was redirected to LPs this
+            // way. The window is only "before the recipient's first ≥ED credit";
+            // once it exists every later slice of any size routes in full, and a
+            // GenesisConfig / migration funds the fee escrow so it never opens on
+            // a real chain.
+            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
+            let fee_escrow = Self::fee_escrow_account();
             // D4: move the routed slices out of the pool account into the fee
             // escrow, so neither reserves nor `sync_reserves` ever see them.
             let escrowed = protocol.checked_add(&creator).ok_or(Error::<T>::Overflow)?;
-            if !escrowed.is_zero() {
+            let route_escrowed = !escrowed.is_zero()
+                && (escrowed >= ed || frame_system::Pallet::<T>::account_exists(&fee_escrow));
+            if route_escrowed {
                 T::Assets::transfer(
                     native.clone(),
                     &pool.pool_account,
-                    &Self::fee_escrow_account(),
+                    &fee_escrow,
                     escrowed,
                     Expendable,
                 )?;
@@ -2458,16 +2502,21 @@ pub mod pallet {
                 }
             }
             // D9: the treasury slice is pushed to the sink (see `TreasurySink`
-            // for why a push is safe here and was not for the other two).
+            // for why a push is safe here and was not for the other two), under
+            // the same Finding-14 guard.
             if let Some(vault) = sink {
-                T::Assets::transfer(
-                    native.clone(),
-                    &pool.pool_account,
-                    &vault,
-                    treasury,
-                    Expendable,
-                )?;
-                T::TreasurySink::note_fee(&other, treasury);
+                if !treasury.is_zero()
+                    && (treasury >= ed || frame_system::Pallet::<T>::account_exists(&vault))
+                {
+                    T::Assets::transfer(
+                        native.clone(),
+                        &pool.pool_account,
+                        &vault,
+                        treasury,
+                        Expendable,
+                    )?;
+                    T::TreasurySink::note_fee(&other, treasury);
+                }
             }
 
             // Finding 3: only add amount_in_after_fee to reserves; the pool's
@@ -2558,7 +2607,7 @@ pub mod pallet {
         /// Derive the shared escrow account holding all pending intent
         /// `token_in` balances. Per-intent accounting lives in the `Intents`
         /// storage map.
-        pub(crate) fn intent_escrow_account() -> T::AccountId {
+        pub fn intent_escrow_account() -> T::AccountId {
             PALLET_ID.into_sub_account_truncating(b"intents")
         }
 

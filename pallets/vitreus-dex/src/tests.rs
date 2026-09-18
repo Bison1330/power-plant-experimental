@@ -3,6 +3,7 @@
 use crate::mock::*;
 use crate::{Error, Event, LiquidityPositions, PoolManager, Pools, TotalLiquidity};
 use frame_support::{assert_noop, assert_ok};
+use sp_runtime::BuildStorage;
 
 fn native() -> NativeOrAssetId {
     NativeOrAssetId::Native
@@ -1374,6 +1375,21 @@ fn seeded_launch_pool(protocol_bps: u16, creator_bps: u16) -> (NativeOrAssetId, 
     set_routing(protocol_bps, creator_bps);
     seed(ESCROW).expect("seed");
     VitreusDex::canonical_pair(native(), launch())
+}
+
+#[test]
+fn finding14_genesis_funds_the_fee_escrow() {
+    // The from-genesis path (SECURITY_AUDIT Finding 14): the DEX genesis endows
+    // the fee escrow with the native ED, so it exists before the first swap.
+    let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+    crate::GenesisConfig::<Test>::default().assimilate_storage(&mut t).unwrap();
+    let mut ext = sp_io::TestExternalities::new(t);
+    ext.execute_with(|| {
+        assert!(
+            frame_system::Pallet::<Test>::account_exists(&VitreusDex::fee_escrow_account()),
+            "genesis funds the fee escrow"
+        );
+    });
 }
 
 #[test]

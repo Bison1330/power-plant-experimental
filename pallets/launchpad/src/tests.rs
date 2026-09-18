@@ -1378,23 +1378,16 @@ fn fm13_dump_model_exposes_concentration() {
 // FM-14 — asset ids
 // =======================================================================
 
+// FM-17 (asset-id squatting; renumbered from the old "FM-14" to end the
+// collision with vitreus-dex SECURITY_AUDIT Finding 14, a different finding).
 #[test]
-fn fm14_asset_id_squatting() {
+fn fm17_asset_id_squatting_is_skipped() {
+    // A squatted next slot no longer bricks the pad: create_launch walks to
+    // the first free asset id and succeeds.
     new_test_ext().execute_with(|| {
         let next = NextLaunchId::<Test>::get();
-        assert_ok!(Assets::create(origin(BOB), asset_of(next).into(), BOB, 1));
-        assert_noop!(
-            Launchpad::create_launch(origin(ALICE), bv(b"N"), bv(b"N"), None, 0, 0, None, None),
-            Error::<Test>::AssetIdTaken
-        );
-        assert_eq!(NextLaunchId::<Test>::get(), next);
-        assert!(Launches::<Test>::get(next).is_none());
-        // Nothing bumps NextLaunchId except a successful create.
-        assert!(!Launchpad::call_names().iter().any(|n| n.contains("next") || n.contains("skip")));
-    });
-    new_test_ext().execute_with(|| {
-        let next = NextLaunchId::<Test>::get();
-        assert_ok!(Assets::create(origin(BOB), asset_of(next + 1).into(), BOB, 1));
+        let squatted = asset_of(next); // base + next
+        assert_ok!(Assets::create(origin(BOB), squatted.into(), BOB, 1));
         assert_ok!(Launchpad::create_launch(
             origin(ALICE),
             bv(b"N"),
@@ -1405,15 +1398,37 @@ fn fm14_asset_id_squatting() {
             None,
             None
         ));
-        assert_noop!(
-            Launchpad::create_launch(origin(ALICE), bv(b"N"), bv(b"N"), None, 0, 0, None, None),
-            Error::<Test>::AssetIdTaken
+        let l = launch(next);
+        assert_eq!(l.asset_id, squatted + 1, "skipped the squatted id to the next free one");
+        assert_eq!(NextLaunchId::<Test>::get(), next + 1);
+        assert_eq!(AssetToLaunch::<Test>::get(squatted + 1), Some(next));
+        assert!(
+            AssetToLaunch::<Test>::get(squatted).is_none(),
+            "the squatted id maps to no launch"
         );
+    });
+    // A whole run squatted ahead of the cursor: still skipped, still succeeds.
+    new_test_ext().execute_with(|| {
+        let next = NextLaunchId::<Test>::get();
+        for k in 0..5u128 {
+            assert_ok!(Assets::create(origin(BOB), (asset_of(next) + k).into(), BOB, 1));
+        }
+        assert_ok!(Launchpad::create_launch(
+            origin(ALICE),
+            bv(b"N"),
+            bv(b"N"),
+            None,
+            0,
+            0,
+            None,
+            None
+        ));
+        assert_eq!(launch(next).asset_id, asset_of(next) + 5, "walked past the whole squatted run");
     });
 }
 
 #[test]
-fn fm14_asset_id_range_never_reused() {
+fn fm17_asset_id_range_never_reused() {
     new_test_ext().execute_with(|| {
         let mut rng = Rng(42);
         let mut created = Vec::new();

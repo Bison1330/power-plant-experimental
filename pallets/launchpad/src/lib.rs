@@ -77,6 +77,12 @@ pub const BPS: u16 = 10_000;
 /// Decimals every launch token is registered with.
 pub const TOKEN_DECIMALS: u8 = 18;
 
+/// FM-17: how far `create_launch` walks past squatted asset ids before it gives
+/// up. A squatter must hold this many contiguous deposits ahead of the cursor to
+/// force even a temporary failure, and the cursor walks past them as soon as they
+/// stop; the bound only keeps one create's scan finite.
+pub const MAX_ASSET_ID_SCAN: u32 = 256;
+
 /// Governance parameters (§1.1). Live; snapshotted into each launch except
 /// `creation_fee`, which is charged once at creation.
 #[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
@@ -384,6 +390,14 @@ pub mod pallet {
     #[pallet::storage]
     pub type NextLaunchId<T: Config> = StorageValue<_, LaunchId, ValueQuery>;
 
+    /// FM-17: monotonic cursor for the next launch asset id to try. Unset on a
+    /// chain that predates the fix; then it starts at `LaunchAssetBase +
+    /// NextLaunchId` (asset ids were `base + launch_id` before), so the first
+    /// create after the upgrade resumes exactly where the old scheme left off
+    /// and skips any already-squatted slot — no migration.
+    #[pallet::storage]
+    pub type NextAssetId<T: Config> = StorageValue<_, AssetIdOf<T>, OptionQuery>;
+
     #[pallet::storage]
     pub type Launches<T: Config> = StorageMap<_, Blake2_128Concat, LaunchId, Launch<T>>;
 
@@ -525,9 +539,19 @@ pub mod pallet {
             ensure!(!name.is_empty() && !symbol.is_empty(), Error::<T>::InvalidMetadata);
 
             let id = NextLaunchId::<T>::get();
-            let asset_id = Self::asset_id_for(id);
-            ensure!(!T::LaunchAssets::asset_exists(asset_id), Error::<T>::AssetIdTaken);
-            ensure!(!AssetToLaunch::<T>::contains_key(asset_id), Error::<T>::AssetIdTaken);
+            // FM-17 (asset-id squatting): the reserved id `LaunchAssetBase + id`
+            // is public and anyone can `pallet_assets::create` it for a deposit,
+            // which used to fail every `create_launch` with `AssetIdTaken` until a
+            // runtime migration bumped the counter — a whole pad bricked for the
+            // price of one asset. Instead, walk from a monotonic cursor to the
+            // first free id and use that; a squatter now only forces the cursor
+            // forward at a deposit per id, and creation always succeeds. The
+            // cursor defaults to `LaunchAssetBase + NextLaunchId` on a chain that
+            // predates this (asset ids were exactly `base + launch_id` then), so
+            // no migration is needed even where a slot is already squatted — the
+            // next create skips it. (This is a different finding from vitreus-dex
+            // SECURITY_AUDIT Finding 14, the sub-ED fee-routing one.)
+            let asset_id = Self::next_free_asset_id()?;
 
             let params = Params::<T>::get();
             let curve = Self::snapshot(&params);
@@ -596,6 +620,9 @@ pub mod pallet {
             );
             AssetToLaunch::<T>::insert(asset_id, id);
             NextLaunchId::<T>::put(id.checked_add(1).ok_or(Error::<T>::ArithmeticOverflow)?);
+            // Advance the FM-17 cursor past the id just used, so the next create
+            // never rescans it (and the walk stays O(1) unless squatting is active).
+            NextAssetId::<T>::put(asset_id.saturating_add(One::one()));
             Self::deposit_event(Event::LaunchCreated {
                 id,
                 asset_id,
@@ -880,6 +907,28 @@ pub mod pallet {
             T::LaunchAssetBase::get().saturating_add(AssetIdOf::<T>::unique_saturated_from(id))
         }
 
+        /// FM-17: the first asset id at or above the cursor that no asset and no
+        /// launch already claims. Bounded so a squatter cannot make one create
+        /// scan without end; `MAX_ASSET_ID_SCAN` contiguous squats ahead of the
+        /// cursor cost that many standing deposits and only delay, since the
+        /// cursor never advances on a failed create and any create in a gap
+        /// moves it past.
+        fn next_free_asset_id() -> Result<AssetIdOf<T>, Error<T>> {
+            let mut candidate = NextAssetId::<T>::get().unwrap_or_else(|| {
+                T::LaunchAssetBase::get()
+                    .saturating_add(AssetIdOf::<T>::unique_saturated_from(NextLaunchId::<T>::get()))
+            });
+            for _ in 0..MAX_ASSET_ID_SCAN {
+                if !T::LaunchAssets::asset_exists(candidate)
+                    && !AssetToLaunch::<T>::contains_key(candidate)
+                {
+                    return Ok(candidate);
+                }
+                candidate = candidate.saturating_add(One::one());
+            }
+            Err(Error::<T>::AssetIdTaken)
+        }
+
         /// D4: who may claim the DEX creator share of `asset`'s graduated
         /// pool — the launch's current `creator_fee_recipient`, so a
         /// `set_creator_fee_recipient` moves the DEX stream with it. The
@@ -997,6 +1046,22 @@ pub mod pallet {
         ) -> Result<(BalanceOf<T>, BalanceOf<T>), DispatchError> {
             let asset = T::IntoAssetKind::convert(launch.asset_id);
             let sink = if treasury > 0 { T::CurveTreasurySink::account_for(&asset) } else { None };
+            // Finding 14 (SECURITY_AUDIT): a sub-ED treasury slice cannot create
+            // the vault before it is funded, and the transfer below would fail the
+            // whole buy with `Token(BelowMinimum)`. Fold such a slice into the
+            // protocol share — the same redirection the retired-treasury case
+            // (`account_for == None`) already does. So, as on the DEX side, a
+            // treasury total (`treasury_fees_paid`) does NOT count a sub-ED slice
+            // taken before the vault existed; the window closes at the vault's
+            // first ≥ED credit (LAUNCH_TREASURY_SPEC §9.6).
+            let ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
+            let treasury_bal: BalanceOf<T> = treasury.into();
+            let sink = match sink {
+                Some(v) if treasury_bal >= ed || frame_system::Pallet::<T>::account_exists(&v) => {
+                    Some(v)
+                },
+                _ => None,
+            };
             let (protocol, treasury) = match sink {
                 Some(_) => (protocol, treasury),
                 None => (protocol + treasury, 0),

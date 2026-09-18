@@ -247,7 +247,7 @@ pub fn create_launch(
 Preconditions:
 1. `!CreationPaused`.
 2. `name`, `symbol` non-empty.
-3. `id = NextLaunchId`; `asset_id = LaunchAssetBase + id`; `!T::Assets::asset_exists(asset_id)` else `AssetIdTaken` (FM-14).
+3. `id = NextLaunchId`; `asset_id` = the first id at or above `NextAssetId` (default `LaunchAssetBase + id`) that no asset and no launch already claims, scanning at most `MAX_ASSET_ID_SCAN`; `AssetIdTaken` only if that many contiguous ids are squatted (FM-17). The cursor advances past the id used.
 4. `params = Params::get()`; compute `curve` and `params_hash`; if `expected_params_hash.is_some()` it must equal `params_hash` else `ParamsMismatch`.
 5. Creator can pay `creation_fee + initial_buy` (checked by the transfers).
 6. `!T::Dex::pool_exists(NativeAssetKind, IntoAssetKind(asset_id))` else `PoolAlreadySeeded` (FM-01 preflight; §4.4).
@@ -677,7 +677,7 @@ Who may call `seed_reserved_pool_for` is a runtime-wiring invariant: only `palle
 
 ### 5.3 Runtime wiring
 
-- `pallet_assets` main instance: `CreateOrigin = EnsureNever` on mainnet, so `fungibles::Create::create` (which bypasses the origin check) is the *only* way this pallet's assets come into existence. On testnet `CreateOrigin = EnsureSigned`; §2.1.3 covers the squatting case (FM-14).
+- `pallet_assets` main instance: `CreateOrigin = EnsureNever` on mainnet, so `fungibles::Create::create` (which bypasses the origin check) is the *only* way this pallet's assets come into existence. On testnet `CreateOrigin = EnsureSigned`; §2.1.3 covers the squatting case (FM-17 — renumbered from the old "FM-14" to end the collision with vitreus-dex `SECURITY_AUDIT.md` Finding 14, the sub-ED fee-routing finding, which is unrelated).
 - `Assets::asset_exists` for ids ≥ `2^64` must be false at genesis. Add a `try_state` on the launchpad that scans nothing (we cannot iterate `pallet_assets` cheaply) but asserts `NextLaunchId`'s next id is free — I12.
 - `dispatch_info_to_fee` in the runtime charges a constant VNRG fee for an explicit pallet list and a weight-based fee otherwise. Decide at integration whether `RuntimeCall::Launchpad(..)` joins the constant list; this spec assumes weight-based (default `_` arm).
 - `OnCurveBuy` bound to `()`.
@@ -687,7 +687,7 @@ Who may call `seed_reserved_pool_for` is a runtime-wiring invariant: only `palle
 
 ## 6. Test plan
 
-Unit tests live in `pallets/launchpad/src/tests.rs` against a mock that includes the real `pallet_vitreus_dex` (D1–D3 landed; D5 required for the rescue path), `pallet_assets` with signed creation (so FM-14 can squat an id), and utility/proxy/multisig for FM-05. The mock uses `AccountId32`: with `u64` ids every PalletId sub-account truncates to the same `"modlvtrs"` prefix and escrow, pool and DEX accounts collide. Property tests use an in-test xorshift generator over trade sequences (no `proptest` in the workspace). Test names are stable identifiers; a test that cannot be made to fail before the mitigation is added is not a test.
+Unit tests live in `pallets/launchpad/src/tests.rs` against a mock that includes the real `pallet_vitreus_dex` (D1–D3 landed; D5 required for the rescue path), `pallet_assets` with signed creation (so FM-17 can squat an id), and utility/proxy/multisig for FM-05. The mock uses `AccountId32`: with `u64` ids every PalletId sub-account truncates to the same `"modlvtrs"` prefix and escrow, pool and DEX accounts collide. Property tests use an in-test xorshift generator over trade sequences (no `proptest` in the workspace). Test names are stable identifiers; a test that cannot be made to fail before the mitigation is added is not a test.
 
 ### 6.1 Failure-mode tests
 
@@ -714,8 +714,8 @@ Unit tests live in `pallets/launchpad/src/tests.rs` against a mock that includes
 | `fm11_create_preflight_rejects_unseedable` | `MINIMUM_LIQUIDITY` is a DEX crate constant, so the guard is exercised directly | `ensure_seedable(1000, 1000)` (isqrt == 1000), `(1001, 1001)`, `(MinGraduationTarget, RESERVED)` | The first fails `Unseedable`, the others pass; a `create_launch` with in-bounds params cannot trip it. |
 | `fm12_wash_trading_is_net_negative` | Every `protocol_share_bps` in `[MinProtocolShareBps, 10_000]`, fee in `[1, MaxCurveFeeBps]` | Creator buys `x`, sells everything back, repeats 20 times, claims creator fees | `creator_fees_claimed < total_fees_paid_by_creator`; VTRS balance of creator strictly decreased. |
 | `fm13_dump_model_exposes_concentration` | Graduated launch; one account holds 30% of `SELLABLE` | Sell 100% into the pool | Realised price impact reported by DEX event equals the constant-product prediction (`(R·0.3·SELLABLE)/(RESERVED + 0.3·SELLABLE)` net of fee) — there is no on-chain mitigation; this test pins the number so the frontend's concentration warning can be checked against it. |
-| `fm14_asset_id_squatting` | Testnet config (`CreateOrigin = EnsureSigned`) | User creates asset `LaunchAssetBase + NextLaunchId` themselves, then `create_launch` | Fails `AssetIdTaken`; `NextLaunchId` unchanged; no partial state. Second case: user creates `LaunchAssetBase + NextLaunchId + 1` — launch `NextLaunchId` succeeds, the following one fails; governance can only skip by a migration that bumps `NextLaunchId` (assert no extrinsic does it). |
-| `fm14_asset_id_range_never_reused` (proptest) | Random sequence of creates | — | I12 holds; `asset_id(id) == Base + id`; `AssetToLaunch` bijective. |
+| `fm17_asset_id_squatting_is_skipped` | Testnet config (`CreateOrigin = EnsureSigned`) | User squats `LaunchAssetBase + NextLaunchId` (and a run of ids) themselves, then `create_launch` | Succeeds: the asset id walks to the first free slot past the squatted one(s); `AssetToLaunch` maps only the id actually used; the squatter has paid a deposit per id and delayed nothing. (Renamed from `fm14_`; renumbered to FM-17.) |
+| `fm17_asset_id_range_never_reused` (proptest) | Random sequence of creates | — | I12 holds; `asset_id(id) == Base + id`; `AssetToLaunch` bijective. |
 | `fm15_escrow_survives_full_sellback_and_claims` | Launch, buy, sell everything back, claim creator fees | — | Escrow account still exists; `Currency::balance(escrow) ≥ ED + reserved_deposits`; asset account of escrow intact; next buy works. Second case: creation fee set to exactly `MinCreationFee` — all steps still succeed. |
 | `fm15_pool_account_gets_native_before_asset` | Not written here: the transfer order is inside the DEX's seeder and the launchpad cannot reverse it | — | Covered by the DEX's `seed_reserved_pool_creates_pool_deposits_stored_amounts_and_locks_forever`, which seeds into a pool account with no native balance (a token-first order would fail). |
 | `fm16_name_symbol_not_enforced_on_chain` | Two launches with identical name/symbol | — | Both succeed (documents that dedupe is a frontend concern in v1). |
