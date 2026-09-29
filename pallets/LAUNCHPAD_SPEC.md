@@ -551,6 +551,45 @@ Why not fail the buy instead: a revert would let a buyer probe for a DEX conditi
 
 `RescueDelay` exists so that a "stuck" launch is observably stuck (many failed public `graduate` attempts) before governance can touch it, and so that the only governance action is still "seed the pool at the curve price", never "move funds elsewhere" (FM-03).
 
+### 4.5 Why the seed is locked forever (FM-06) — decided 2026-09-29
+
+The escrow's LP position is locked until `BlockNumber::MAX` (≈816 years at 6 s blocks), no call shortens it (D3), the escrow has no key, and the position cannot be transferred. Test `fm06_no_creator_lp_and_position_is_permanent` holds this. This section records why, and what the lock costs, so the question is not re-derived.
+
+**Infinite, not long.** A long lock and an infinite lock defend against different things. Any finite lock needs someone to receive the position when it ends. Whoever that is — the creator, the protocol, a treasury — can withdraw the pool on a known date, and every holder can see that date coming. That is a scheduled rug: holders race each other to sell before the unlock, and the lock's last weeks are worse for them than no lock at all. A lock that decays has the same problem spread over time — the exit gets shallower every block. An infinite lock has no beneficiary and no date, so there is nothing to front-run. That property is the point of the design; a long lock does not have it at any length.
+
+**What is actually locked: at least 0.2·T, not T.** The pool holds T of VTRS against `RESERVED` = 200M tokens at graduation, but the VTRS is not all stuck. Any holder of the launch token can take VTRS out by selling into the pool. What can never leave is the VTRS backing the seed tokens nobody owns. With `k = T × RESERVED` and at most `S − burned` tokens ever in the pool:
+
+```
+min VTRS reserve = k / (S − burned) = T × RESERVED / (S − burned)  ≥  T × 0.2
+```
+
+If every holder sold everything, the pool would pay out ≈0.8·T and keep 0.2·T (before fees). Two things raise the floor over time and nothing lowers it: the retained pool fee (below) grows `k`, and every token the launch treasury burns (LAUNCH_TREASURY_SPEC §6.4) can never be sold back. In practice a dead launch strands something between 0.2·T and T, depending on whether its holders bother to sell.
+
+Worked figure, 2026-09-29: the only VTRS market is wVTRS/USDC on Uniswap V3 (Ethereum) at ≈$0.0061. A $20k target is ≈3.26M VTRS; its floor is ≈651k VTRS, 0.31% of the ≈210M circulating (CoinMarketCap's wVTRS figure; native mainnet supply may differ). That is ≈320 fully-exited dead launches before the floors alone equal the circulating supply. We accept that ceiling.
+
+**What comparable launchpads do** (researched 2026-09-29; [S] = secondary source, not checked against the platform's own docs):
+
+| Platform | Graduation liquidity | What protects buyers |
+|---|---|---|
+| pump.fun | Since 2025-03-20 `migrate` is permissionless and creates a PumpSwap pool whose LP tokens "are burned" (pump-public-docs). The earlier Raydium path also burned LP [S]. | Nobody holds LP. |
+| four.meme (BNB) | All raised BNB (≈18 BNB, per its docs) paired with 20% of supply on PancakeSwap; LP burned [S]. | Burn. |
+| Raydium LaunchLab | 90% of LP burned, 10% locked with a fee-claim NFT [S]. | Burn + lock. |
+| Clanker (Base) | Not a curve: launches straight into Uniswap liquidity, locked forever in its LpLocker, fees claimable [S]. | Permanent lock. |
+| Meteora DBC | Each launchpad's config chooses claimable or permanently locked per share; fees stay claimable on locked LP. | Only the locked share. |
+
+The cost is measured, not hypothetical: SolanaFloor counted ≈1.38M SOL (≈$287M) in inactive pump.fun pools, 74.6% of graduated pools. None of these platforms has a way to recover dead-pool liquidity. The difference here is scale: SOL can absorb that; VTRS supply is small and illiquid, and our treasury burns raise the floor. The 0.2·T floor is the number to size T against.
+
+**Considered and not taken: dormancy-gated recycling.** The one alternative that holds up: after `DormancyBlocks` with no trade (the same test `retire` uses, LAUNCH_TREASURY_SPEC §2.4), turn the pool into a redemption facility — holders burn tokens for VTRS at the last pool price, so their exit is unchanged — and release the VTRS backing the ownerless seed tokens to the treasury or protocol. Not taken because:
+
+1. It frees little: at most ≈0.2·T plus fee growth per launch, and only from dead launches. The ceiling above is one we would be glad to reach.
+2. It adds the one removal path whose absence is the guarantee. Today a buyer or integrator checks an absence — "nothing removes the seed" (FM-03, fm06). With recycling they would have to check a condition, and every condition is surface: the dormancy clock, the redemption price, the new DEX entry point that takes liquidity out of a locked position.
+3. Nobody comparable does it.
+4. It can be added later and cannot be taken back. Launch terms are snapshotted (§1.4), so recycling added in a later runtime would apply to launches created after it. Removing a permanence guarantee from pools that graduated under it would break a promise already made.
+
+Also considered: seeding with less than the raise (shallower pools; the rest has to go to someone, which changes creator incentives) and a smaller `RESERVED` share (lowers the floor, but `RESERVED` is tied to the curve's end price through `VT_FLOOR` and m = 16, so the curve would have to be re-derived). Neither was taken.
+
+**The locked position's share of pool fees is never claimable.** The DEX has no per-position fee accounting. A swap's fee splits into routed slices — protocol, creator, treasury, paid out in VTRS (DEX D4/D9) — and the part the pool keeps, which stays in the reserves and grows `k`. Under D10 the pool keeps at least `pool_floor_bps` (10 bps at tiers 3 and 10), so that anyone who adds liquidity after graduation earns something. Retained fees accrue to every LP share pro rata and are realised only by `remove_liquidity`. The escrow's position can never be removed, so its share — all of it, until outside LPs arrive — stays in the pool for good. It is not destroyed: it deepens the pool, token holders recover part of it by selling, and the rest raises the 0.2·T floor. But nobody can claim it as fee income. That is the same outcome as pump.fun's and four.meme's burned LP, and unlike Meteora, where locked LP keeps a claimable fee stream. The routed slices are this design's answer to that — they are how graduated-pool fees reach the creator and the treasury (D4 was added for exactly this reason). The retained 10 bps is deliberate, not a leak.
+
 ---
 
 ## 5. Invariants
@@ -700,7 +739,7 @@ Unit tests live in `pallets/launchpad/src/tests.rs` against a mock that includes
 | `fm03_flash_style_complete_then_extract` | Launch at 50% progress | Actor buys to completion in one call, then attempts every call from the fm03 list in the same block | Actor's VTRS out ≤ VTRS in − fees; the only way to get VTRS back is `sell` (rejected, phase Complete) or the pool after seed at `p_end` with price impact. |
 | `fm04_donation_to_escrow_is_inert` | Launch at 30% | Transfer 100 VTRS and 10M tokens (bought) directly to escrow | `quote_buy(1 VTRS)` identical before/after; `tokens_remaining`, `real_quote` unchanged; a later crossing seeds exactly `(real_quote, RESERVED)`; donated amounts remain in escrow after graduation (never enter the pool). |
 | `fm05_all_entry_paths_hit_the_hook` | Bind `BuyHook` to a mock that records `(launch_id, who, now, quote_in)` and rejects `who == BLACKLISTED` | Call `buy` directly; via `utility.batch_all`; via `proxy.proxy`; via `multisig`; via `create_launch(initial_buy>0)` | Every path produces exactly one hook call per buy with identical arguments; the blacklisted account is rejected on every path; a batch of N buys yields N hook calls (no aggregation). |
-| `fm06_no_creator_lp_and_position_is_permanent` | Graduated launch | (a) creator calls `remove_liquidity`; (b) escrow "signs" (impossible — assert no key derivation); (c) call `lock_liquidity_for(escrow, …, lock_until = now)` through the trait | (a) `InsufficientShares`; (c) `LockCannotBeShortened` and `locked_until` remains `MAX`; `LiquidityPositions` contains exactly one position for the pair, owned by escrow, `locked_until == Some(MAX)`; advancing to `BlockNumber::MAX − 1` still blocks removal. |
+| `fm06_no_creator_lp_and_position_is_permanent` (why permanent: §4.5) | Graduated launch | (a) creator calls `remove_liquidity`; (b) escrow "signs" (impossible — assert no key derivation); (c) call `lock_liquidity_for(escrow, …, lock_until = now)` through the trait | (a) `InsufficientShares`; (c) `LockCannotBeShortened` and `locked_until` remains `MAX`; `LiquidityPositions` contains exactly one position for the pair, owned by escrow, `locked_until == Some(MAX)`; advancing to `BlockNumber::MAX − 1` still blocks removal. |
 | `fm07_hook_receives_block_numbers_not_time` | Mock hook that rejects buys where `now == launch_created_at` | Buy in the creation block from a non-creator; buy in creation block via `create_launch(initial_buy)`; change `Timestamp` without advancing block | Non-creator rejected; creator initial buy passes (`is_creator == true`); timestamp change alone does not alter the outcome. (Behavioural hook test for the v2 mechanism's substrate; v1 `()` variant asserts pass-through.) |
 | `fm08_crossing_buy_partial_fill_and_deferred_seed` | Launch with `tokens_remaining = 1M`; DEX mock forced to fail seeding once | Buy with `q_in` = 3× the VTRS needed to sell out | Buyer receives exactly `1M` tokens; charged exactly `quote_net_used + fee` per §3.3 (≤ `q_in`, remainder untouched); `phase == Complete`; `GraduationDeferred` emitted; `sell` now fails `WrongPhase`; `buy` fails `WrongPhase`; unforce the DEX; anyone calls `graduate` → `Graduated`, pool reserves `(real_quote, RESERVED)`. |
 | `fm08_min_tokens_out_respected_on_partial_fill` | Same | Buy with `min_tokens_out = 2M` | Fails `SlippageExceeded`; state unchanged; a second buyer with `min_tokens_out = 0` completes the curve. |
