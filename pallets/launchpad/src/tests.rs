@@ -2264,11 +2264,11 @@ mod free_trades {
         });
     }
 
-    /// Written down where whoever sets the real target will see it: at the
-    /// placeholder 3,000-unit graduation target and an energy fee of ~16 VTRS
-    /// (September 2026) the threshold is 3,200, more than the whole curve
-    /// takes, so no trade on such a launch can ever be free — not even the
-    /// one that crosses. The target is what has to move.
+    /// A threshold above the graduation target makes every trade paid: at
+    /// the placeholder 3,000-unit target and a 16-unit fee the threshold is
+    /// 200 × 16 = 3,200, more than the whole curve takes, so no trade on such
+    /// a launch can be free — not even the one that crosses. Free trades need
+    /// a target well above 200 × the fee.
     #[test]
     fn at_the_placeholder_target_no_trade_can_be_free() {
         new_test_ext().execute_with(|| {

@@ -1220,12 +1220,12 @@ pub mod pallet {
         /// Below the threshold a trade still succeeds and pays as before; the
         /// threshold decides only whether it is free.
         ///
-        /// The threshold can exceed a launch's whole curve. At the placeholder
-        /// runtime default graduation target of 3,000 VTRS and an energy fee
-        /// of ~16 VTRS (September 2026) it is ~3,200 VTRS, so no trade on such
-        /// a launch can ever be free. That is an argument about the
-        /// graduation target, not the threshold: a real target must be large
-        /// against 200 × the fee for free trades to exist at all.
+        /// The threshold can exceed a launch's whole curve: when it is above
+        /// the graduation target, no trade on the launch can ever be free.
+        /// That is an argument about the graduation target, not the
+        /// threshold: a target must be well above the threshold (200 × the
+        /// fee at 100 bps with a 50% non-creator share) for free trades to
+        /// exist at all.
         pub fn free_trade_threshold(curve: &CurveParams<BalanceOf<T>>) -> Option<BalanceOf<T>> {
             let non_creator_bps = (curve.protocol_share_bps as u128
                 + curve.treasury_share_bps as u128)
