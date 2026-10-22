@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cc345d239021683217cb8a81c83877c02891cef2715feb2533df57639deb9611 # shrinks to ops = [Swap { who: 0, pool: 14, native_in: false, amount: 1000000000000000000 }, Swap { who: 0, pool: 238, native_in: false, amount: 99999999999999 }]
+cc 23fea618906138d088827f5905ece7a6b4c0769c318febf8acbfad4dd8030a65 # shrinks to ops = [FillOwnSlots { who: 24 }, Swap { who: 39, pool: 3, native_in: true, amount: 1 }]

@@ -28,8 +28,8 @@
 //! gives the fee escrow an ED, so the failures that follow only from it
 //! having none do not drown out the rest.
 //!
-//! **Where it runs.** `survey_*` (ignored) runs many programs without
-//! stopping and prints every
+//! **Where it runs.** `cargo test` runs the properties in seconds.
+//! `survey_*` (ignored) runs many programs without stopping and prints every
 //! distinct finding with the program that produced it first:
 //! `cargo test -p pallet-vitreus-dex --release -- --ignored survey --nocapture`.
 
@@ -630,4 +630,42 @@ fn survey_endowed_honest() {
 #[ignore = "a survey, not a property: run by hand with --nocapture"]
 fn survey_endowed_hostile() {
     survey(Mode::endowed(true), 400);
+}
+
+// ---- properties -------------------------------------------------------------
+
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(32)
+}
+
+fn judge(mode: Mode, ops: &[Op]) -> Result<(), TestCaseError> {
+    let findings = run_program(mode, ops);
+    prop_assert!(
+        findings.is_empty(),
+        "\n{}\nprogram:\n{}",
+        findings.keys().map(|f| format!("  {f:?}")).collect::<Vec<_>>().join("\n"),
+        ops.iter()
+            .enumerate()
+            .map(|(i, o)| format!("  {i:>2}. {o:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(RunnerConfig { cases: cases(), max_shrink_iters: 4096, ..RunnerConfig::default() })]
+
+    /// The DEX as it is, with outsiders acting on every account it owns
+    /// or pays.
+    #[test]
+    fn fuzz_dex_runtime_like_with_outsiders(ops in program(true)) {
+        judge(Mode::today(true), &ops)?;
+    }
+
+    /// The same, from a chain whose fee escrow holds an ED.
+    #[test]
+    fn fuzz_dex_endowed_fee_escrow_with_outsiders(ops in program(true)) {
+        judge(Mode::endowed(true), &ops)?;
+    }
 }
