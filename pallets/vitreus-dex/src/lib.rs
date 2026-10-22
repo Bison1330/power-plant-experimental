@@ -39,6 +39,8 @@
 #[cfg(test)]
 mod account_lifecycle_tests;
 #[cfg(test)]
+mod fuzz;
+#[cfg(test)]
 mod mock;
 #[cfg(test)]
 mod settlement_integration_tests;
@@ -996,7 +998,12 @@ pub mod pallet {
     }
 
     #[pallet::hooks]
-    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
+    impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        #[cfg(feature = "try-runtime")]
+        fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            Self::do_try_state()
+        }
+    }
 
     /// Finding 14, from-genesis path: endow the fee escrow with the native ED so
     /// it exists before the first swap and every routed protocol/creator slice —
@@ -1865,6 +1872,111 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// What every account the pallet owns must hold, and how its records
+        /// must agree with one another. Each check is a balance the pallet
+        /// promised someone or a count two maps must share:
+        ///
+        /// - the intent escrow holds, per asset, at least the sum of every
+        ///   open or committed intent's recorded input;
+        /// - an intent has a recorded input exactly while it is open or
+        ///   committed, and a commitment exactly while it is committed;
+        /// - the fee escrow holds at least every unclaimed protocol and
+        ///   creator fee;
+        /// - an active solver's escrow holds at least its bond, an inactive
+        ///   solver has none, and its open-commitment count is the number of
+        ///   commitments naming it;
+        /// - a pool account holds at least its recorded reserves, and the
+        ///   pool's shares are its positions plus the locked minimum.
+        #[cfg(any(feature = "try-runtime", test))]
+        pub fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
+            use crate::settlement::IntentStatus;
+            use frame_support::ensure;
+            use sp_std::vec::Vec;
+
+            // Recorded intent inputs, summed per asset.
+            let mut owed: Vec<(T::AssetKind, T::Balance)> = Vec::new();
+            for (id, (asset, amount)) in IntentEscrowBalances::<T>::iter() {
+                let intent = Intents::<T>::get(id).ok_or("an escrowed input has no intent")?;
+                ensure!(
+                    matches!(intent.status, IntentStatus::Open | IntentStatus::Committed),
+                    "a closed intent still has an escrowed input"
+                );
+                ensure!(
+                    intent.token_in == asset && intent.amount_in == amount,
+                    "an escrowed input differs from its intent"
+                );
+                match owed.iter_mut().find(|(a, _)| *a == asset) {
+                    Some((_, sum)) => *sum = sum.saturating_add(amount),
+                    None => owed.push((asset, amount)),
+                }
+            }
+            let intent_escrow = Self::intent_escrow_account();
+            for (asset, sum) in owed {
+                ensure!(
+                    T::Assets::balance(asset, &intent_escrow) >= sum,
+                    "the intent escrow holds less than its open intents"
+                );
+            }
+            for (id, intent) in Intents::<T>::iter() {
+                let live = matches!(intent.status, IntentStatus::Open | IntentStatus::Committed);
+                ensure!(
+                    IntentEscrowBalances::<T>::contains_key(id) == live,
+                    "an open or committed intent has no escrowed input"
+                );
+                ensure!(
+                    FillCommitments::<T>::contains_key(id)
+                        == (intent.status == IntentStatus::Committed),
+                    "a commitment does not match its intent's status"
+                );
+            }
+
+            let native = T::NativeAsset::get();
+            let fees = CreatorFeesUnclaimed::<T>::iter_values()
+                .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
+            ensure!(
+                T::Assets::balance(native.clone(), &Self::fee_escrow_account()) >= fees,
+                "the fee escrow holds less than the fees it owes"
+            );
+
+            for (id, solver) in Solvers::<T>::iter() {
+                if solver.active {
+                    ensure!(
+                        T::Assets::balance(native.clone(), &Self::solver_escrow_account(id))
+                            >= solver.bond,
+                        "a solver escrow holds less than its bond"
+                    );
+                } else {
+                    ensure!(solver.bond.is_zero(), "an inactive solver still has a bond");
+                }
+                let named = FillCommitments::<T>::iter_values()
+                    .filter(|c| c.solver_id == id)
+                    .count() as u32;
+                ensure!(
+                    solver.active_commitments == named,
+                    "a solver's commitment count differs from its commitments"
+                );
+            }
+
+            for (pair, pool) in Pools::<T>::iter() {
+                ensure!(
+                    T::Assets::balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
+                        && T::Assets::balance(pair.1.clone(), &pool.pool_account) >= pool.reserve_b,
+                    "a pool account holds less than its reserves"
+                );
+                let total = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
+                if !total.is_zero() {
+                    let positions = LiquidityPositions::<T>::iter()
+                        .filter(|(_, p, _)| *p == pair)
+                        .fold(T::Balance::zero(), |a, (_, _, l)| a.saturating_add(l.shares));
+                    ensure!(
+                        positions.saturating_add(MINIMUM_LIQUIDITY.into()) == total,
+                        "a pool's shares differ from its positions"
+                    );
+                }
+            }
+            Ok(())
+        }
+
         /// The account ID of the Vitreus DEX.
         pub fn account_id() -> T::AccountId {
             AccountIdConversion::<T::AccountId>::into_account_truncating(&PALLET_ID)

@@ -30,7 +30,7 @@ fn sufficient() -> NativeOrAssetId {
     NativeOrAssetId::WithId(SUFFICIENT_ID)
 }
 
-fn native_of(who: u128) -> u128 {
+fn native_of(who: AccountId) -> u128 {
     Balances::free_balance(who)
 }
 
@@ -53,13 +53,15 @@ fn fresh_token_with_pool() -> NativeOrAssetId {
 
 fn next_free_asset_id() -> u32 {
     (100..RESERVED_ASSET_BASE)
-        .find(|id| !<Assets as frame_support::traits::fungibles::Inspect<u128>>::asset_exists(*id))
+        .find(|id| {
+            !<Assets as frame_support::traits::fungibles::Inspect<AccountId>>::asset_exists(*id)
+        })
         .expect("free asset id below the reserved range")
 }
 
 /// DAVE creates one-unit balances of fresh non-sufficient assets on `who`
 /// until pallet-assets would refuse to open another account there.
-fn fill_consumer_slots(who: u128) {
+fn fill_consumer_slots(who: AccountId) {
     while frame_system::Pallet::<Test>::can_accrue_consumers(&who, 2) {
         let id = next_free_asset_id();
         assert_ok!(Assets::force_create(RuntimeOrigin::root(), id, DAVE, false, 1));
@@ -85,14 +87,19 @@ fn quote(asset_in: NativeOrAssetId, asset_out: NativeOrAssetId, amount_in: u128)
     .expect("the pool quotes this swap")
 }
 
-fn register(who: u128) -> u64 {
+fn register(who: AccountId) -> u64 {
     let id = NextSolverId::<Test>::get();
     assert_ok!(VitreusDex::register_solver(RuntimeOrigin::signed(who)));
     id
 }
 
 /// `who` submits an intent with a generous deadline; returns its id.
-fn submit(who: u128, token_in: NativeOrAssetId, token_out: NativeOrAssetId, amount: u128) -> u64 {
+fn submit(
+    who: AccountId,
+    token_in: NativeOrAssetId,
+    token_out: NativeOrAssetId,
+    amount: u128,
+) -> u64 {
     let id = NextIntentId::<Test>::get();
     assert_ok!(VitreusDex::submit_intent(
         RuntimeOrigin::signed(who),
@@ -106,7 +113,7 @@ fn submit(who: u128, token_in: NativeOrAssetId, token_out: NativeOrAssetId, amou
 }
 
 /// Give `who` an ED of native, so it exists and can hold any amount.
-fn endow(who: u128) {
+fn endow(who: AccountId) {
     assert_ok!(Balances::transfer_keep_alive(RuntimeOrigin::signed(DAVE), who, RUNTIME_ED));
 }
 
@@ -114,11 +121,11 @@ fn past_settlement_window() {
     System::set_block_number(System::block_number() + 6);
 }
 
-fn intent_escrow() -> u128 {
+fn intent_escrow() -> AccountId {
     VitreusDex::intent_escrow_account()
 }
 
-fn fee_treasury() -> u128 {
+fn fee_treasury() -> AccountId {
     VitreusDex::protocol_treasury_account()
 }
 
@@ -323,7 +330,7 @@ fn user_filling_their_consumer_slots_after_commit_does_not_fail_settlement() {
 #[test]
 fn user_reaping_their_account_after_commit_does_not_fail_settlement() {
     new_runtime_like_ext().execute_with(|| {
-        const EVE: u128 = 5;
+        const EVE: AccountId = acc(5);
         let token = fresh_token_with_pool();
         endow(fee_treasury());
         register(BOB);
@@ -337,6 +344,68 @@ fn user_reaping_their_account_after_commit_does_not_fail_settlement() {
         assert!(!frame_system::Pallet::<Test>::account_exists(&EVE));
 
         assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), id));
+    });
+}
+
+#[test]
+fn token_intent_settles_into_native_below_ed_when_escrow_holds_no_native() {
+    new_runtime_like_ext().execute_with(|| {
+        pool(native(), sufficient(), 10_000 * UNIT);
+        endow(fee_treasury());
+        register(BOB);
+        // The escrow exists through the sufficient token alone.
+        let amount = RUNTIME_ED / 2;
+        let id = submit(ALICE, sufficient(), native(), amount);
+        let out = quote(sufficient(), native(), amount);
+        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), id, out));
+
+        assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), id));
+    });
+}
+
+#[test]
+fn solver_whose_slots_third_party_filled_still_settles_into_new_token() {
+    new_runtime_like_ext().execute_with(|| {
+        let token = fresh_token_with_pool();
+        endow(fee_treasury());
+        register(BOB);
+        submit(CHARLIE, native(), usdc(), 10 * UNIT);
+        let id = submit(ALICE, native(), token.clone(), 10 * UNIT);
+        let out = quote(native(), token, 10 * UNIT);
+        // A profit, which the solver takes in a token it has never held.
+        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), id, out / 2));
+        fill_consumer_slots(BOB);
+
+        assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), id));
+    });
+}
+
+#[test]
+fn user_reaping_their_account_does_not_lock_solvers_bond() {
+    new_runtime_like_ext().execute_with(|| {
+        const EVE: AccountId = acc(5);
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), EVE, 100 * UNIT));
+        submit(CHARLIE, native(), usdc(), 10 * UNIT);
+        let solver = register(BOB);
+        let id = NextIntentId::<Test>::get();
+        if VitreusDex::submit_intent(
+            RuntimeOrigin::signed(EVE),
+            native(),
+            usdc(),
+            RUNTIME_ED / 2,
+            1,
+            System::block_number() + 100,
+        )
+        .is_err()
+        {
+            return;
+        }
+        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), id, 1));
+        assert_ok!(Balances::transfer_all(RuntimeOrigin::signed(EVE), DAVE, false));
+        past_settlement_window();
+
+        assert_ok!(VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), id));
+        assert_eq!(Solvers::<Test>::get(solver).map(|s| s.active_commitments), Some(0));
     });
 }
 
@@ -413,12 +482,17 @@ fn withdrawing_protocol_fees_leaves_creators_unclaimed_fees_claimable() {
         assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, ALICE, 1_000_000 * UNIT));
         assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 15, 1, 0));
         assert_ok!(<VitreusDex as crate::ReservedPoolSeeder<
-            u128,
+            AccountId,
             NativeOrAssetId,
             u128,
             u64,
         >>::seed_reserved_pool_for(
-            &ALICE, launch.clone(), native(), 100_000 * UNIT, 1_000 * UNIT, 3
+            &ALICE,
+            launch.clone(),
+            native(),
+            100_000 * UNIT,
+            1_000 * UNIT,
+            3
         ));
         assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), CREATOR, 100 * UNIT));
         // The creator's slice of this swap is below one ED; the protocol's is not.
@@ -434,6 +508,53 @@ fn withdrawing_protocol_fees_leaves_creators_unclaimed_fees_claimable() {
 
         assert_ok!(VitreusDex::withdraw_protocol_fees(RuntimeOrigin::signed(DAVE)));
         assert_ok!(VitreusDex::claim_pool_creator_fees(RuntimeOrigin::signed(CREATOR), launch));
+    });
+}
+
+/// A plain native/USDC pool that routes a protocol slice of every trade
+/// to the fee escrow.
+fn routed_pool() {
+    assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 10, 5, 0, 0));
+    pool(native(), usdc(), 10_000 * UNIT);
+}
+
+#[test]
+fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
+    new_runtime_like_ext().execute_with(|| {
+        routed_pool();
+        assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            usdc(),
+            10 * UNIT,
+            1,
+            BOB,
+        ));
+        assert!(crate::ProtocolFeesUnclaimed::<Test>::get() >= RUNTIME_ED);
+        let escrow = VitreusDex::fee_escrow_account();
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(DAVE), USDC_ID, escrow, 1));
+
+        assert_ok!(VitreusDex::withdraw_protocol_fees(RuntimeOrigin::signed(DAVE)));
+    });
+}
+
+#[test]
+fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
+    new_runtime_like_ext().execute_with(|| {
+        routed_pool();
+        // The fee escrow now exists, holding no native.
+        let escrow = VitreusDex::fee_escrow_account();
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(DAVE), SUFFICIENT_ID, escrow, 1));
+
+        // Its protocol slice is below one ED.
+        assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            usdc(),
+            UNIT / 1_000,
+            1,
+            BOB,
+        ));
     });
 }
 
@@ -486,6 +607,40 @@ fn pool_against_sufficient_token_still_takes_liquidity_after_its_last_lp_leaves(
             0,
             0,
         ));
+    });
+}
+
+#[test]
+fn lps_exit_never_destroys_another_lps_share_of_pool() {
+    new_runtime_like_ext().execute_with(|| {
+        pool(native(), sufficient(), 10 * UNIT);
+        let small = 9 * RUNTIME_ED / 100;
+        assert_ok!(VitreusDex::add_liquidity(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            sufficient(),
+            small,
+            small,
+            0,
+            0,
+        ));
+        let pair = VitreusDex::canonical_pair(native(), sufficient());
+        let shares = crate::LiquidityPositions::<Test>::get(ALICE, &pair).expect("position").shares;
+        if VitreusDex::remove_liquidity(
+            RuntimeOrigin::signed(ALICE),
+            native(),
+            sufficient(),
+            shares,
+            0,
+            0,
+        )
+        .is_err()
+        {
+            return;
+        }
+
+        let pool_account = Pools::<Test>::get(&pair).expect("pool").pool_account;
+        assert!(native_of(pool_account) > 0, "BOB's native left with ALICE's exit");
     });
 }
 
