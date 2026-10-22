@@ -263,7 +263,9 @@ parameter_types! {
     pub const LaunchAssetBase: u128 = ASSET_BASE;
     pub const MinGraduationTarget: u128 = 3 * UNIT;
     pub const MaxGraduationTarget: u128 = 3_000_000_000 * UNIT;
-    pub const MinCreationFee: u128 = 2 * ED + 100 + 100 + 2 * 50 * 2; // 2·ED + AssetDeposit + MetadataDepositBase + 2·StringLimit·PerByte
+    // 2·ED + AssetDeposit + MetadataDepositBase + 2·StringLimit·PerByte +
+    // AssetAccountDeposit (the pool address's launch-token account)
+    pub const MinCreationFee: u128 = 2 * ED + 100 + 100 + 2 * 50 * 2 + 10;
     pub const TreasuryAccount: Acc = TREASURY;
     pub DefaultLaunchParams: LaunchParams<u128> = LaunchParams {
         graduation_target: T_DEFAULT,

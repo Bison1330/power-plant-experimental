@@ -822,6 +822,13 @@ pub mod pallet {
             if !t.pending_burn.is_zero()
                 && now.saturating_sub(t.last_burn_block) >= terms.min_burn_interval
             {
+                // The slice buys the launch token into the vault, one account
+                // for every launch: where its consumer references are used up
+                // the token's account there is opened on the caller's
+                // deposit, so a full vault cannot stop the burn.
+                if let Some(asset) = Self::asset_kind_of(launch_id) {
+                    pallet_vitreus_dex::Pallet::<T>::open_for_credit(asset, &vault, caller)?;
+                }
                 let before = Self::assets_balance(Self::native(), &vault);
                 let pending_before = t.pending;
                 if let Some(tokens) =

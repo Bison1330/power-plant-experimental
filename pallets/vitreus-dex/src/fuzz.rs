@@ -362,11 +362,6 @@ impl World {
                 let asset = kind(pool_asset(pool));
                 let (a_in, a_out) = if native_in { (native(), asset) } else { (asset, native()) };
                 let amount = affordable(&who, &a_in, amount)?;
-                // A trader whose own account cannot open another asset is
-                // refused by pallet-assets, not by the DEX.
-                if !can_hold(&who, &a_out) {
-                    return None;
-                }
                 (
                     "swap",
                     VitreusDex::swap_exact_tokens_for_tokens(
@@ -566,16 +561,6 @@ fn affordable(who: &AccountId, asset: &NativeOrAssetId, amount: u128) -> Option<
     );
     let a = amount.min(held / 2);
     (a > 0).then_some(a)
-}
-
-/// Whether `who` holds `asset` already or could open it: pallet-assets
-/// opens a non-sufficient balance only on an account that could take two
-/// more consumer references.
-fn can_hold(who: &AccountId, asset: &NativeOrAssetId) -> bool {
-    use frame_support::traits::fungibles::Inspect;
-    matches!(asset, NativeOrAssetId::Native)
-        || <Test as Config>::Assets::balance(asset.clone(), who) > 0
-        || frame_system::Pallet::<Test>::can_accrue_consumers(who, 2)
 }
 
 /// One-unit balances of fresh non-sufficient assets on `who` until

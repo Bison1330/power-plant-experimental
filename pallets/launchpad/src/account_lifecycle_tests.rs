@@ -122,3 +122,17 @@ fn sufficient_token_on_vault_does_not_fail_small_buy() {
         assert_eq!(Balances::free_balance(&vault), 0, "the slice folded into the protocol share");
     });
 }
+
+/// A buyer whose consumer references are used up gets the launch token on a
+/// deposit of their own instead of being refused.
+#[test]
+fn buyer_with_every_consumer_slot_used_can_still_buy_launch_token() {
+    new_test_ext().execute_with(|| {
+        let id = create(ALICE);
+        fill_consumer_slots(&BOB);
+        let reserved = Balances::reserved_balance(&BOB);
+        assert_ok!(Launchpad::buy(origin(BOB), id, 10 * UNIT, 0));
+        assert!(Assets::balance(asset_of(id), &BOB) > 0);
+        assert_eq!(Balances::reserved_balance(&BOB), reserved + 10);
+    });
+}

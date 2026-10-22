@@ -76,8 +76,21 @@ fn setup_asset<T: Config>(seed: u32, holders: &[&T::AccountId]) -> T::AssetKind
 where
     T::Assets: Create<T::AccountId>,
 {
+    setup_asset_with::<T>(seed, holders, true)
+}
+
+/// [`setup_asset`], sufficient or not.
+fn setup_asset_with<T: Config>(
+    seed: u32,
+    holders: &[&T::AccountId],
+    sufficient: bool,
+) -> T::AssetKind
+where
+    T::Assets: Create<T::AccountId>,
+{
     let asset = T::BenchmarkHelper::asset_kind(seed);
-    T::Assets::create(asset.clone(), holders[0].clone(), true, One::one()).expect("create asset");
+    T::Assets::create(asset.clone(), holders[0].clone(), sufficient, One::one())
+        .expect("create asset");
     for h in holders {
         T::Assets::mint_into(asset.clone(), h, big::<T>()).expect("mint asset");
     }
@@ -89,8 +102,16 @@ fn setup_pool<T: Config>(provider: &T::AccountId) -> T::AssetKind
 where
     T::Assets: Create<T::AccountId>,
 {
+    setup_pool_with::<T>(provider, true)
+}
+
+/// [`setup_pool`] against a sufficient or a non-sufficient asset.
+fn setup_pool_with<T: Config>(provider: &T::AccountId, sufficient: bool) -> T::AssetKind
+where
+    T::Assets: Create<T::AccountId>,
+{
     fund_native::<T>(provider);
-    let asset = setup_asset::<T>(ASSET_A, &[provider]);
+    let asset = setup_asset_with::<T>(ASSET_A, &[provider], sufficient);
     Dex::<T>::do_create_pool(native::<T>(), asset.clone(), FEE_TIER).expect("create pool");
     Dex::<T>::do_add_liquidity_for(
         provider,
@@ -103,6 +124,14 @@ where
     )
     .expect("seed liquidity");
     asset
+}
+
+/// Use up `who`'s consumer references, so that a credit of a non-sufficient
+/// asset it does not hold has to open its account on a deposit.
+pub fn fill_consumers<T: frame_system::Config>(who: &T::AccountId) {
+    while frame_system::Pallet::<T>::can_accrue_consumers(who, 2) {
+        frame_system::Pallet::<T>::inc_consumers(who).expect("room for one more");
+    }
 }
 
 fn manage_origin<T: Config>() -> Result<T::RuntimeOrigin, BenchmarkError> {
@@ -176,9 +205,12 @@ mod benchmarks {
     #[benchmark]
     fn swap_exact_tokens_for_tokens() {
         let provider: T::AccountId = account("provider", 0, 0);
-        let asset = setup_pool::<T>(&provider);
-        // D4: the dearer branch — a pool that routes both slices, so the swap
-        // also transfers to the fee escrow and bumps both counters.
+        // The dearer branch: a non-sufficient asset bought into an account
+        // whose consumer references are used up, so the swap first opens the
+        // caller's account for it on a deposit; and a pool that routes
+        // both slices, so the swap also transfers to the fee escrow and bumps
+        // both counters.
+        let asset = setup_pool_with::<T>(&provider, false);
         let pair = Dex::<T>::canonical_pair(native::<T>(), asset.clone());
         Pools::<T>::mutate(&pair, |p| {
             if let Some(p) = p {
@@ -187,20 +219,20 @@ mod benchmarks {
         });
         let caller: T::AccountId = whitelisted_caller();
         fund_native::<T>(&caller);
-        T::Assets::mint_into(asset.clone(), &caller, big::<T>()).expect("mint");
-        let before = T::Assets::balance(native::<T>(), &caller);
+        fill_consumers::<T>(&caller);
+        assert!(T::Assets::should_touch(asset.clone(), &caller));
 
         #[extrinsic_call]
         _(
             RawOrigin::Signed(caller.clone()),
-            asset,
             native::<T>(),
+            asset.clone(),
             trade::<T>(),
             One::one(),
             caller.clone(),
         );
 
-        assert!(T::Assets::balance(native::<T>(), &caller) > before);
+        assert!(!T::Assets::balance(asset, &caller).is_zero());
         assert!(!CreatorFeesUnclaimed::<T>::get(&pair).is_zero());
         assert!(!ProtocolFeesUnclaimed::<T>::get().is_zero());
     }

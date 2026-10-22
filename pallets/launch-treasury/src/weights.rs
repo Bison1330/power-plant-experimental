@@ -194,6 +194,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(652_665_000, 13975)
 			.saturating_add(T::DbWeight::get().reads(26_u64))
 			.saturating_add(T::DbWeight::get().writes(19_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(T::DbWeight::get().reads(3_u64))
+			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 	/// Storage: `LaunchTreasury::Treasuries` (r:1 w:1)
 	/// Proof: `LaunchTreasury::Treasuries` (`max_values`: None, `max_size`: Some(109), added: 2584, mode: `MaxEncodedLen`)
@@ -477,6 +482,11 @@ impl WeightInfo for () {
 		Weight::from_parts(652_665_000, 13975)
 			.saturating_add(RocksDbWeight::get().reads(26_u64))
 			.saturating_add(RocksDbWeight::get().writes(19_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(RocksDbWeight::get().reads(3_u64))
+			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 	/// Storage: `LaunchTreasury::Treasuries` (r:1 w:1)
 	/// Proof: `LaunchTreasury::Treasuries` (`max_values`: None, `max_size`: Some(109), added: 2584, mode: `MaxEncodedLen`)

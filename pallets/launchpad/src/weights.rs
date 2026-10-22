@@ -114,6 +114,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 			.saturating_add(Weight::from_parts(4_331, 0).saturating_mul(u.into()))
 			.saturating_add(T::DbWeight::get().reads(17_u64))
 			.saturating_add(T::DbWeight::get().writes(16_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(T::DbWeight::get().reads(3_u64))
+			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)
@@ -137,6 +142,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(216_602_000, 6184)
 			.saturating_add(T::DbWeight::get().reads(9_u64))
 			.saturating_add(T::DbWeight::get().writes(6_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(T::DbWeight::get().reads(3_u64))
+			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)
@@ -184,6 +194,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(606_943_000, 11378)
 			.saturating_add(T::DbWeight::get().reads(19_u64))
 			.saturating_add(T::DbWeight::get().writes(22_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(T::DbWeight::get().reads(3_u64))
+			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)
@@ -407,6 +422,11 @@ impl WeightInfo for () {
 			.saturating_add(Weight::from_parts(4_331, 0).saturating_mul(u.into()))
 			.saturating_add(RocksDbWeight::get().reads(17_u64))
 			.saturating_add(RocksDbWeight::get().writes(16_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(RocksDbWeight::get().reads(3_u64))
+			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)
@@ -430,6 +450,11 @@ impl WeightInfo for () {
 		Weight::from_parts(216_602_000, 6184)
 			.saturating_add(RocksDbWeight::get().reads(9_u64))
 			.saturating_add(RocksDbWeight::get().writes(6_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(RocksDbWeight::get().reads(3_u64))
+			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)
@@ -477,6 +502,11 @@ impl WeightInfo for () {
 		Weight::from_parts(606_943_000, 11378)
 			.saturating_add(RocksDbWeight::get().reads(19_u64))
 			.saturating_add(RocksDbWeight::get().writes(22_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(RocksDbWeight::get().reads(3_u64))
+			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 	/// Storage: `Launchpad::Launches` (r:1 w:0)
 	/// Proof: `Launchpad::Launches` (`max_values`: None, `max_size`: Some(176), added: 2651, mode: `MaxEncodedLen`)

@@ -212,8 +212,20 @@ mod benchmarks {
         frame_system::Pallet::<T>::set_block_number(
             frame_system::Pallet::<T>::block_number() + Terms::<T>::get().min_burn_interval,
         );
+        let asset = <T as pallet_launchpad::Config>::IntoAssetKind::convert(
+            Launches::<T>::get(id).expect("launch").asset_id,
+        );
+        // The dearer branch: the vault's consumer references are used up, so
+        // the slice first opens its launch-token account there, on the
+        // caller's deposit.
+        pallet_vitreus_dex::benchmarking::fill_consumers::<T>(&Pallet::<T>::vault());
+        let deposit =
+            <<T as pallet_vitreus_dex::Config>::Assets as frame_support::traits::AccountTouch<
+                _,
+                _,
+            >>::deposit_required(asset);
         let caller: T::AccountId = whitelisted_caller();
-        set_native::<T>(&caller, ed);
+        set_native::<T>(&caller, ed + deposit);
         let supply_before = <<T as pallet_vitreus_dex::Config>::Assets as FungiblesInspect<
             T::AccountId,
         >>::total_issuance(
