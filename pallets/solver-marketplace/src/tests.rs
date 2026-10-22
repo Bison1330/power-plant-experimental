@@ -963,3 +963,30 @@ fn r6_a_solver_raising_its_own_bid_locks_its_bond_forever() {
         );
     });
 }
+
+#[test]
+fn migration_v1_endows_both_escrows_once() {
+    use crate::migrations::v1::MigrateToV1;
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+
+    new_runtime_like_ext().execute_with(|| {
+        let escrows =
+            [Marketplace::intent_escrow_account(), Marketplace::protocol_treasury_account()];
+        // A token on the intent escrow makes it exist without any native.
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(ALICE), SUFFICIENT_ID, escrows[0], 1));
+        StorageVersion::new(0).put::<Marketplace>();
+        let issuance = Balances::total_issuance();
+
+        MigrateToV1::<Test>::on_runtime_upgrade();
+
+        for e in escrows {
+            assert_eq!(Balances::free_balance(e), RUNTIME_ED);
+        }
+        assert_eq!(Balances::total_issuance(), issuance + 2 * RUNTIME_ED);
+        assert_eq!(Marketplace::on_chain_storage_version(), StorageVersion::new(1));
+
+        // Gated: a second run is a no-op.
+        MigrateToV1::<Test>::on_runtime_upgrade();
+        assert_eq!(Balances::total_issuance(), issuance + 2 * RUNTIME_ED);
+    });
+}

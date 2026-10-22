@@ -237,6 +237,9 @@ fn build_runtime_like_ext(genesis: bool) -> sp_io::TestExternalities {
         pallet_vitreus_dex::GenesisConfig::<Test>::default()
             .assimilate_storage(&mut t)
             .unwrap();
+        pallet_solver_marketplace::GenesisConfig::<Test>::default()
+            .assimilate_storage(&mut t)
+            .unwrap();
     }
 
     let mut ext = sp_io::TestExternalities::new(t);
