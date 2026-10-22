@@ -14,19 +14,22 @@ pub mod v1 {
     ///
     /// Genesis does this for a chain built with the pallet; a chain that
     /// receives the pallet by upgrade runs no genesis, so without this its
-    /// escrows would start with nothing. The ED is minted, as genesis does,
-    /// rather than drawn from an account that may not hold it.
-    pub struct VersionUncheckedMigrateToV1<T>(PhantomData<T>);
+    /// escrows would start with nothing. Each ED is paid by `Source` (the
+    /// runtime binds its Treasury), keeping its own ED, so issuance does not
+    /// change. A source that cannot pay is logged, and `post_upgrade` then
+    /// fails try-runtime: fund the source before the upgrade.
+    pub struct VersionUncheckedMigrateToV1<T, Source>(PhantomData<(T, Source)>);
 
-    impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV1<T> {
+    impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
+        for VersionUncheckedMigrateToV1<T, Source>
+    {
         fn on_runtime_upgrade() -> Weight {
-            let endowed = Pallet::<T>::endow_escrows();
+            let endowed = Pallet::<T>::endow_escrows(Some(&Source::get()));
             log::info!(
                 target: "runtime::solver-marketplace",
                 "v1 migration: endowed {endowed} escrow(s) with the ED"
             );
-            // Per escrow: its balance, and on a mint its account and the
-            // total issuance.
+            // Per escrow: its balance, and on a transfer it and the source.
             T::DbWeight::get().reads_writes(4, 2u64.saturating_mul(endowed.into()))
         }
 
@@ -48,10 +51,10 @@ pub mod v1 {
 
     /// Escrow endowment, gated on the pallet's on-chain storage version
     /// (0 on a chain that has just received the pallet).
-    pub type MigrateToV1<T> = VersionedMigration<
+    pub type MigrateToV1<T, Source> = VersionedMigration<
         0,
         1,
-        VersionUncheckedMigrateToV1<T>,
+        VersionUncheckedMigrateToV1<T, Source>,
         Pallet<T>,
         <T as frame_system::Config>::DbWeight,
     >;
