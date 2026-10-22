@@ -151,6 +151,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 		Weight::from_parts(290_927_000, 6184)
 			.saturating_add(T::DbWeight::get().reads(14_u64))
 			.saturating_add(T::DbWeight::get().writes(14_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(T::DbWeight::get().reads(3_u64))
+			.saturating_add(T::DbWeight::get().writes(3_u64))
 	}
 	/// Storage: `VitreusDex::LiquidityPositions` (r:1 w:1)
 	/// Proof: `VitreusDex::LiquidityPositions` (`max_values`: None, `max_size`: Some(111), added: 2586, mode: `MaxEncodedLen`)
@@ -328,6 +333,11 @@ impl WeightInfo for () {
 		Weight::from_parts(290_927_000, 6184)
 			.saturating_add(RocksDbWeight::get().reads(14_u64))
 			.saturating_add(RocksDbWeight::get().writes(14_u64))
+			// An asset account opened on a deposit (pallet-assets `touch`, at its
+			// own reference weight), until this is re-run on the dearer branch.
+			.saturating_add(Weight::from_parts(33_080_000, 3675))
+			.saturating_add(RocksDbWeight::get().reads(3_u64))
+			.saturating_add(RocksDbWeight::get().writes(3_u64))
 	}
 	/// Storage: `VitreusDex::LiquidityPositions` (r:1 w:1)
 	/// Proof: `VitreusDex::LiquidityPositions` (`max_values`: None, `max_size`: Some(111), added: 2586, mode: `MaxEncodedLen`)

@@ -411,3 +411,43 @@ fn chain_from_genesis_endows_fee_escrow_token_already_keeps_alive() {
         assert!(native_of(escrow) >= RUNTIME_ED, "{escrow} holds {}", native_of(escrow));
     });
 }
+
+// ---------------------------------------------------------------------------
+// Consumer references
+// ---------------------------------------------------------------------------
+
+/// DAVE creates one-unit balances of fresh non-sufficient assets on `who`
+/// until pallet-assets would refuse to open another account there.
+fn fill_consumer_slots(who: AccountId) {
+    while frame_system::Pallet::<Test>::can_accrue_consumers(&who, 2) {
+        let id = crate::testing::next_free_asset_id::<Test>(100);
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), id, DAVE, false, 1));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(DAVE), id, who, 1));
+    }
+}
+
+/// A trader whose consumer references are used up buys a token they do not
+/// hold on a deposit of their own, instead of being refused.
+#[test]
+fn trader_with_every_consumer_slot_used_can_still_buy_new_token() {
+    new_runtime_like_ext().execute_with(|| {
+        let id = crate::testing::next_free_asset_id::<Test>(100);
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), id, ALICE, false, 1));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), id, ALICE, RUNTIME_LIKE_BALANCE));
+        let token = NativeOrAssetId::WithId(id);
+        pool(native(), token.clone(), 10_000 * UNIT);
+        fill_consumer_slots(BOB);
+        let reserved = Balances::reserved_balance(BOB);
+
+        assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            token,
+            UNIT,
+            1,
+            BOB,
+        ));
+        assert!(Assets::balance(id, BOB) > 0);
+        assert_eq!(Balances::reserved_balance(BOB), reserved + RUNTIME_ASSET_ACCOUNT_DEPOSIT);
+    });
+}

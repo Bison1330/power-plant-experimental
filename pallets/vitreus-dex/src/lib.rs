@@ -58,7 +58,7 @@ use frame_support::{
             Preservation::{self, Expendable, Preserve},
             Provenance, WithdrawConsequence,
         },
-        Contains, Get,
+        AccountTouch, Contains, Get,
     },
     PalletId,
 };
@@ -387,12 +387,17 @@ pub trait IntentSwap<AccountId, AssetKind, Balance> {
 /// 2. creates the pool, or adopts an existing pool that has never received
 ///    liquidity (`TotalLiquidity == 0`); a pool that already holds shares is
 ///    rejected with `PoolAlreadySeeded`;
-/// 3. sweeps any balance the pool's sub-account already holds in either asset
-///    to [`Config::ExcessRecipient`], so a donation parked at the (predictable)
-///    pool address before seeding cannot be absorbed by `sync_reserves` into
-///    the opening price. If the recipient cannot receive the asset the whole
-///    seed fails with `ExcessRecipientCannotReceive` — loudly, so a mis-wired
-///    recipient is noticed and fixed, after which seeding can be retried;
+/// 3. clears any balance the pool's sub-account already holds in either
+///    asset, so a donation parked at the (predictable) pool address before
+///    seeding cannot be absorbed by `sync_reserves` into the opening price:
+///    the reserved asset is burned, and the quote (all but the pool
+///    account's own ED) is swept to [`Config::ExcessRecipient`]. If the
+///    recipient cannot receive the quote the whole seed fails with
+///    `ExcessRecipientCannotReceive` — loudly, so a mis-wired recipient is
+///    noticed and fixed, after which seeding can be retried. The reserved
+///    asset is not swept: crediting it needs a free consumer reference at
+///    the recipient, which anyone can use up, so a sweep there could be made
+///    to block every graduation;
 /// 4. pulls exactly `(amount_quote, amount_asset)` from `who` — quote first, so
 ///    the pool account has a provider before it receives a possibly
 ///    non-sufficient asset — as the pool's first deposit;
@@ -459,9 +464,15 @@ pub mod pallet {
         type AssetKind: Parameter + MaxEncodedLen;
 
         /// Registry of assets utilized for providing liquidity.
+        ///
+        /// `AccountTouch` opens an asset account on a deposit for a holder
+        /// whose consumer references are used up (see
+        /// [`Pallet::open_for_credit`]); the runtime's `NativeAndAssets`
+        /// (`fungible::UnionOf` of Balances and pallet-assets) provides it.
         type Assets: Inspect<Self::AccountId, AssetId = Self::AssetKind, Balance = Self::Balance>
             + Mutate<Self::AccountId>
-            + Balanced<Self::AccountId>;
+            + Balanced<Self::AccountId>
+            + AccountTouch<Self::AssetKind, Self::AccountId, Balance = Self::Balance>;
 
         /// Identifier of native asset.
         #[pallet::constant]
@@ -716,6 +727,18 @@ pub mod pallet {
             /// LP shares credited to `who`.
             shares: T::Balance,
         },
+        /// A pre-seed balance of the reserved asset in its pool's
+        /// sub-account was burned, so it could not affect the opening price.
+        /// Unlike other assets it is not swept to `ExcessRecipient`: that
+        /// credit can be made to fail, and it would block the graduation.
+        PreSeedBalanceBurned {
+            /// The pool pair (canonical order).
+            pool: (T::AssetKind, T::AssetKind),
+            /// The reserved asset.
+            asset: T::AssetKind,
+            /// Amount burned.
+            amount: T::Balance,
+        },
     }
 
     #[pallet::error]
@@ -960,6 +983,9 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             ensure!(recipient == who, Error::<T>::RecipientNotSigner);
+            // A person whose consumer references are used up can still buy
+            // a token they do not hold, on their own deposit.
+            Self::open_for_credit(asset_out.clone(), &who, &who)?;
             Self::do_swap(
                 &who,
                 asset_in,
@@ -1318,6 +1344,27 @@ pub mod pallet {
             )
         }
 
+        /// Make sure `who` can be credited `asset` without a free consumer
+        /// reference: if pallet-assets would refuse to open the account the
+        /// usual way (no room for two more references, or no provider),
+        /// open it on a deposit paid by `payer`. A deposit-backed account
+        /// needs no consumer reference or provider and stays open at zero
+        /// balance. Native and sufficient assets never need it.
+        ///
+        /// `payer` must be the signer of the extrinsic being served, never
+        /// an account the pallet owns: a deposit reserved there would no
+        /// longer match what the pallet records it holds.
+        pub fn open_for_credit(
+            asset: T::AssetKind,
+            who: &T::AccountId,
+            payer: &T::AccountId,
+        ) -> DispatchResult {
+            if T::Assets::should_touch(asset.clone(), who) {
+                T::Assets::touch(asset, who, payer)?;
+            }
+            Ok(())
+        }
+
         /// For a pool with no native side, give `pool_account` its ED of
         /// native — its provider — paid by `payer`, before any token lands.
         /// A pool with a native side gets it with that side's deposit.
@@ -1553,6 +1600,27 @@ pub mod pallet {
                 let held =
                     T::Assets::reducible_balance(swept.clone(), &pool.pool_account, keep, Polite);
                 if held.is_zero() {
+                    continue;
+                }
+                // The reserved asset is burned. A credit of it to the
+                // recipient needs a free consumer reference there, which
+                // anyone can use up beforehand, and failing the seed would
+                // block the graduation of every launch whose pool address
+                // received a donation.
+                if T::ReservedAssets::contains(&swept) {
+                    T::Assets::burn_from(
+                        swept.clone(),
+                        &pool.pool_account,
+                        held,
+                        Expendable,
+                        frame_support::traits::tokens::Precision::Exact,
+                        frame_support::traits::tokens::Fortitude::Force,
+                    )?;
+                    Self::deposit_event(Event::PreSeedBalanceBurned {
+                        pool: pair.clone(),
+                        asset: swept,
+                        amount: held,
+                    });
                     continue;
                 }
                 // Deliver to the recipient. If it cannot take the asset (for
