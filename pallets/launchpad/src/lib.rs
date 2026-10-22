@@ -26,6 +26,8 @@ pub mod weights;
 pub use weights::WeightInfo;
 
 #[cfg(test)]
+mod account_lifecycle_tests;
+#[cfg(test)]
 mod mock;
 #[cfg(test)]
 mod tests;

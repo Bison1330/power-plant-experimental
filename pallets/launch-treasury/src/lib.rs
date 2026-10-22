@@ -33,6 +33,8 @@ pub use pallet::*;
 pub mod weights;
 pub use weights::WeightInfo;
 
+#[cfg(test)]
+mod account_lifecycle_tests;
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
 #[cfg(test)]

@@ -44,7 +44,7 @@ impl frame_system::Config for Test {
 #[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
 impl pallet_balances::Config for Test {
     type Balance = u128;
-    type ExistentialDeposit = ConstU128<1>;
+    type ExistentialDeposit = ExistentialDeposit;
     type AccountStore = System;
 }
 
@@ -59,8 +59,8 @@ impl pallet_assets::Config for Test {
     type Currency = Balances;
     type CreateOrigin = AsEnsureOriginWithArg<EnsureSigned<Self::AccountId>>;
     type ForceOrigin = EnsureRoot<Self::AccountId>;
-    type AssetDeposit = ConstU128<0>;
-    type AssetAccountDeposit = ConstU128<0>;
+    type AssetDeposit = AssetDeposit;
+    type AssetAccountDeposit = AssetAccountDeposit;
     type MetadataDepositBase = ConstU128<0>;
     type MetadataDepositPerByte = ConstU128<0>;
     type ApprovalDeposit = ConstU128<0>;
@@ -83,6 +83,16 @@ type NativeAndAssets = frame_support::traits::fungible::UnionOf<
     NativeOrAssetId,
     u128,
 >;
+
+parameter_types! {
+    // Per-thread, so each test sees the values its externalities set. The
+    // defaults are the unit-test values the arithmetic tests are written
+    // against; `new_runtime_like_ext` switches to the runtime's.
+    pub static ExistentialDeposit: u128 = 1;
+    pub static AssetDeposit: u128 = 0;
+    pub static AssetAccountDeposit: u128 = 0;
+    pub static DefaultSolverBondAmount: u128 = 1_000_000_000_000;
+}
 
 parameter_types! {
     pub const NativeAsset: NativeOrAssetId = NativeOrAssetId::Native;
@@ -178,13 +188,19 @@ impl Config for Test {
     type TreasurySink = MockSink;
     type DefaultBidWindowBlocks = ConstU64<10>;
     type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = ConstU128<1_000_000_000_000>;
+    type DefaultSolverBondAmount = DefaultSolverBondAmount;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = MockBenchHelper;
 }
 
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
+    // Tests share a thread under `--test-threads=1`.
+    ExistentialDeposit::set(1);
+    AssetDeposit::set(0);
+    AssetAccountDeposit::set(0);
+    DefaultSolverBondAmount::set(1_000_000_000_000);
+
     let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 
     pallet_balances::GenesisConfig::<Test> {
@@ -214,6 +230,82 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     }
     .assimilate_storage(&mut t)
     .unwrap();
+
+    let mut ext = sp_io::TestExternalities::new(t);
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        SINK_VAULT.with(|v| *v.borrow_mut() = None);
+        SINK_NOTED.with(|n| n.borrow_mut().clear());
+    });
+    ext
+}
+
+/// 10^18 sub-units per whole unit, VTRS and tokens alike.
+pub const UNIT: u128 = 1_000_000_000_000_000_000;
+/// The runtime's existential deposit (100 µVTRS).
+pub const RUNTIME_ED: u128 = 100_000_000_000_000;
+/// The runtime's `AssetDeposit` and `AssetAccountDeposit`.
+pub const RUNTIME_ASSET_DEPOSIT: u128 = 100;
+pub const RUNTIME_ASSET_ACCOUNT_DEPOSIT: u128 = 10;
+/// The runtime's default solver bond.
+pub const RUNTIME_SOLVER_BOND: u128 = 1_000 * UNIT;
+/// A sufficient asset; on the runtime no asset is, so only tests about the
+/// sufficient case use it.
+pub const SUFFICIENT_ID: u32 = 3;
+/// Neither a user nor a solver in the runtime-like tests.
+pub const DAVE: u128 = 4;
+/// Native and token balance of each actor in the runtime-like tests.
+pub const RUNTIME_LIKE_BALANCE: u128 = 1_000_000 * UNIT;
+
+/// Externalities shaped like the runtime the DEX runs on: its ED and asset
+/// deposits, every asset non-sufficient except `SUFFICIENT_ID`, the bond at
+/// its default, and the treasury holding exactly its ED. The DEX's genesis
+/// build does not run, as on a chain that receives the pallet by upgrade;
+/// `new_runtime_like_ext_from_genesis` runs it.
+pub(crate) fn new_runtime_like_ext() -> sp_io::TestExternalities {
+    build_runtime_like_ext(false)
+}
+
+pub(crate) fn new_runtime_like_ext_from_genesis() -> sp_io::TestExternalities {
+    build_runtime_like_ext(true)
+}
+
+fn build_runtime_like_ext(dex_genesis: bool) -> sp_io::TestExternalities {
+    ExistentialDeposit::set(RUNTIME_ED);
+    AssetDeposit::set(RUNTIME_ASSET_DEPOSIT);
+    AssetAccountDeposit::set(RUNTIME_ASSET_ACCOUNT_DEPOSIT);
+    DefaultSolverBondAmount::set(RUNTIME_SOLVER_BOND);
+
+    let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
+    let actors = [ALICE, BOB, CHARLIE, DAVE];
+    pallet_balances::GenesisConfig::<Test> {
+        balances: actors
+            .iter()
+            .map(|a| (*a, RUNTIME_LIKE_BALANCE))
+            .chain(core::iter::once((TREASURY, RUNTIME_ED)))
+            .collect(),
+    }
+    .assimilate_storage(&mut t)
+    .unwrap();
+    pallet_assets::GenesisConfig::<Test> {
+        assets: vec![
+            (USDC_ID, ALICE, false, 1),
+            (VNRG_ID, ALICE, false, 1),
+            (SUFFICIENT_ID, ALICE, true, 1),
+        ],
+        accounts: [USDC_ID, VNRG_ID, SUFFICIENT_ID]
+            .iter()
+            .flat_map(|id| actors.iter().map(move |a| (*id, *a, RUNTIME_LIKE_BALANCE)))
+            .collect(),
+        ..Default::default()
+    }
+    .assimilate_storage(&mut t)
+    .unwrap();
+    if dex_genesis {
+        pallet_vitreus_dex::GenesisConfig::<Test>::default()
+            .assimilate_storage(&mut t)
+            .unwrap();
+    }
 
     let mut ext = sp_io::TestExternalities::new(t);
     ext.execute_with(|| {
