@@ -218,7 +218,8 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
 /// Externalities shaped like the runtime (see
 /// [`pallet_vitreus_dex::testing`]), the bond at its default. Neither
 /// pallet's genesis build runs, as on a chain that receives them by
-/// upgrade; `new_runtime_like_ext_from_genesis` runs them.
+/// upgrade, and the DEX's upgrade migrations have run;
+/// `new_runtime_like_ext_from_genesis` runs both genesis builds instead.
 pub(crate) fn new_runtime_like_ext() -> sp_io::TestExternalities {
     build_runtime_like_ext(false)
 }
@@ -244,6 +245,13 @@ fn build_runtime_like_ext(genesis: bool) -> sp_io::TestExternalities {
     }
 
     let mut ext = sp_io::TestExternalities::new(t);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        if !genesis {
+            use frame_support::traits::UncheckedOnRuntimeUpgrade;
+            pallet_vitreus_dex::migrations::v6::VersionUncheckedMigrateToV6::<Test>::on_runtime_upgrade();
+            System::reset_events();
+        }
+    });
     ext
 }

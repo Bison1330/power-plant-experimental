@@ -225,17 +225,23 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
 /// Externalities shaped like the runtime the DEX runs on: its ED and asset
 /// deposits, every asset non-sufficient except `SUFFICIENT_ID`, and the
 /// treasury holding exactly its ED (see [`crate::testing`]). The DEX's
-/// genesis build does not run, as on a chain that receives the pallet by
-/// upgrade; `new_runtime_like_ext_from_genesis` runs it.
+/// genesis build does not run, as on a chain that received the pallet by
+/// upgrade; that chain then runs this version's upgrade, so its migrations
+/// have run. `new_runtime_like_ext_before_upgrade` is the same chain before
+/// it, and `new_runtime_like_ext_from_genesis` one built with the pallet.
 pub(crate) fn new_runtime_like_ext() -> sp_io::TestExternalities {
-    build_runtime_like_ext(false)
+    build_runtime_like_ext(false, true)
+}
+
+pub(crate) fn new_runtime_like_ext_before_upgrade() -> sp_io::TestExternalities {
+    build_runtime_like_ext(false, false)
 }
 
 pub(crate) fn new_runtime_like_ext_from_genesis() -> sp_io::TestExternalities {
-    build_runtime_like_ext(true)
+    build_runtime_like_ext(true, false)
 }
 
-fn build_runtime_like_ext(dex_genesis: bool) -> sp_io::TestExternalities {
+fn build_runtime_like_ext(dex_genesis: bool, upgraded: bool) -> sp_io::TestExternalities {
     ExistentialDeposit::set(RUNTIME_ED);
     AssetDeposit::set(RUNTIME_ASSET_DEPOSIT);
     AssetAccountDeposit::set(RUNTIME_ASSET_ACCOUNT_DEPOSIT);
@@ -252,6 +258,11 @@ fn build_runtime_like_ext(dex_genesis: bool) -> sp_io::TestExternalities {
         System::set_block_number(1);
         SINK_VAULT.with(|v| *v.borrow_mut() = None);
         SINK_NOTED.with(|n| n.borrow_mut().clear());
+        if upgraded {
+            use frame_support::traits::UncheckedOnRuntimeUpgrade;
+            crate::migrations::v6::VersionUncheckedMigrateToV6::<Test>::on_runtime_upgrade();
+            System::reset_events();
+        }
     });
     ext
 }

@@ -101,9 +101,12 @@ fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
     });
 }
 
+/// Before the upgrade endows the fee escrow, so the routing guard is what
+/// is under test: an account a sufficient asset keeps alive holds no native
+/// and cannot take a sub-ED slice, whether it "exists" or not.
 #[test]
 fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
-    new_runtime_like_ext().execute_with(|| {
+    new_runtime_like_ext_before_upgrade().execute_with(|| {
         routed_pool();
         // The fee escrow now exists, holding no native.
         let escrow = VitreusDex::fee_escrow_account();
@@ -228,7 +231,48 @@ fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
 
         let recorded = Pools::<Test>::get(&pair).expect("pool").reserve_a;
         assert!(recorded > 0, "the swap left native in the pool");
-        assert_eq!(native_of(pool_account), recorded);
+        // No native was dusted: what the account holds as a reserve is what
+        // the pool records, and the account kept its own ED.
+        assert_eq!(VitreusDex::reserve_balance(native(), &pool_account), recorded);
+        assert!(native_of(pool_account) >= RUNTIME_ED);
+    });
+}
+
+/// The same guard for a launch's treasury vault, which nothing endows
+/// before its first fee of at least an ED.
+#[test]
+fn sufficient_token_on_launch_vault_does_not_fail_small_swaps() {
+    new_runtime_like_ext().execute_with(|| {
+        let launch = NativeOrAssetId::WithId(LAUNCH_ID);
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), LAUNCH_ID, ALICE, false, 1));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, ALICE, 1_000_000 * UNIT));
+        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 5, 5, 10));
+        assert_ok!(<VitreusDex as crate::ReservedPoolSeeder<
+            AccountId,
+            NativeOrAssetId,
+            u128,
+            u64,
+        >>::seed_reserved_pool_for(
+            &ALICE,
+            launch.clone(),
+            native(),
+            100_000 * UNIT,
+            1_000 * UNIT,
+            3
+        ));
+        SINK_VAULT.with(|v| *v.borrow_mut() = Some(VAULT));
+        // The vault now exists, holding no native.
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(DAVE), SUFFICIENT_ID, VAULT, 1));
+
+        // Its treasury slice is below one ED.
+        assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            launch,
+            UNIT / 1_000,
+            1,
+            BOB,
+        ));
     });
 }
 
@@ -240,6 +284,26 @@ fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
 fn chain_from_genesis_starts_with_fee_escrow_holding_ed() {
     new_runtime_like_ext_from_genesis().execute_with(|| {
         let escrow = VitreusDex::fee_escrow_account();
+        assert!(native_of(escrow) >= RUNTIME_ED, "{escrow} holds {}", native_of(escrow));
+    });
+}
+
+#[test]
+fn chain_from_genesis_endows_fee_escrow_token_already_keeps_alive() {
+    use sp_runtime::BuildStorage;
+    ExistentialDeposit::set(RUNTIME_ED);
+    AssetDeposit::set(RUNTIME_ASSET_DEPOSIT);
+    AssetAccountDeposit::set(RUNTIME_ASSET_ACCOUNT_DEPOSIT);
+    let mut t = runtime_like_storage::<Test>();
+    let escrow = VitreusDex::fee_escrow_account();
+    pallet_assets::GenesisConfig::<Test> {
+        accounts: vec![(SUFFICIENT_ID, escrow, 1)],
+        ..Default::default()
+    }
+    .assimilate_storage(&mut t)
+    .unwrap();
+    crate::GenesisConfig::<Test>::default().assimilate_storage(&mut t).unwrap();
+    sp_io::TestExternalities::new(t).execute_with(|| {
         assert!(native_of(escrow) >= RUNTIME_ED, "{escrow} holds {}", native_of(escrow));
     });
 }

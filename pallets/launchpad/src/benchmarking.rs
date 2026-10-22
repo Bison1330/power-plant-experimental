@@ -131,14 +131,22 @@ fn assert_swept<T: Config>(id: LaunchId, before: (BalanceOf<T>, BalanceOf<T>)) {
     let raise: BalanceOf<T> = curve::raise_at_sellout(&terms, T::Sellable::get().into())
         .expect("raise")
         .into();
-    assert_eq!(T::Currency::balance(&pool), raise, "pool holds the raised VTRS and nothing parked");
+    // Above the pool account's own ED, which is not a reserve.
+    let ed =
+        <T::Currency as frame_support::traits::fungible::Inspect<T::AccountId>>::minimum_balance();
+    assert_eq!(
+        T::Currency::balance(&pool),
+        raise + ed,
+        "pool holds the raised VTRS and nothing parked"
+    );
     assert_eq!(
         T::LaunchAssets::balance(launch.asset_id, &pool),
         Launchpad::<T>::reserved(),
         "pool holds the reserved supply and nothing parked"
     );
     let excess = <T as pallet_vitreus_dex::Config>::ExcessRecipient::get();
-    assert!(T::Currency::balance(&excess) >= before.0 + small_quote::<T>());
+    // The parked VTRS, but for the first ED, which the pool account keeps.
+    assert!(T::Currency::balance(&excess) + ed >= before.0 + small_quote::<T>());
     assert!(T::LaunchAssets::balance(launch.asset_id, &excess) >= before.1 + small_quote::<T>());
 }
 

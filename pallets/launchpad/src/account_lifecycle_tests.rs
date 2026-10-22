@@ -90,3 +90,35 @@ fn donation_of_launch_token_graduates_although_excess_recipient_is_full() {
         assert_eq!(phase(id), Phase::Graduated, "deferred with {:?}", deferred_error());
     });
 }
+
+/// A launch's treasury vault, before its first fee of at least an ED,
+/// takes a sub-ED curve slice only if that leaves it an ED of native. One
+/// a sufficient asset keeps alive "exists" and holds none: the slice must
+/// fold into the protocol share, not fail the buy.
+#[test]
+fn sufficient_token_on_vault_does_not_fail_small_buy() {
+    new_test_ext().execute_with(|| {
+        let vault = Acc::new([87u8; 32]);
+        SINK_VAULT.with(|v| *v.borrow_mut() = Some(vault.clone()));
+        assert_ok!(Launchpad::set_params(
+            RuntimeOrigin::root(),
+            crate::LaunchParams {
+                graduation_target: T_DEFAULT,
+                curve_fee_bps: 100,
+                protocol_share_bps: 2_500,
+                treasury_share_bps: 2_500,
+                pool_fee_tier: 3,
+                creation_fee: CREATION_FEE,
+            }
+        ));
+        let id = create(ALICE);
+        let sufficient = 5_000u128;
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), sufficient.into(), DAVE, true, 1));
+        assert_ok!(Assets::mint(origin(DAVE), sufficient.into(), vault.clone(), 1));
+        assert!(frame_system::Pallet::<Test>::account_exists(&vault));
+
+        // 1% fee, a quarter of it to the treasury: a slice of a quarter ED.
+        assert_ok!(Launchpad::buy(origin(BOB), id, ED, 0));
+        assert_eq!(Balances::free_balance(&vault), 0, "the slice folded into the protocol share");
+    });
+}
