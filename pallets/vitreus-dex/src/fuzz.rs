@@ -1,12 +1,15 @@
 //! Property-based fuzzing of the DEX on the runtime-like mock
 //! (`new_runtime_like_ext`): the runtime's existential deposit and asset
 //! deposits, every asset but one non-sufficient, twenty-byte accounts.
+//! The solver marketplace's harness (`pallet_solver_marketplace`'s `fuzz`
+//! module) runs the same world with intents on top; this one is the DEX
+//! alone.
 //!
-//! **Programs.** A `Vec<Op>` of trades, liquidity moves and the whole intent
-//! lifecycle, plus what anyone outside the pallet can do to an account the
-//! pallet owns or pays: send it one unit of any asset, fill its consumer
-//! slots, reap their own account after a commit and come back later. Every
-//! `Op` names an actor, pool or intent by index modulo what exists, so any
+//! **Programs.** A `Vec<Op>` of trades, liquidity moves and fee claims,
+//! plus what anyone outside the pallet can do to an account the pallet
+//! owns or pays: send it one unit of any asset, fill its consumer slots,
+//! reap their own account and come back later. Every
+//! `Op` names an actor or pool by index modulo what exists, so any
 //! subsequence is still a valid program and shrinking always lands on one
 //! that runs.
 //!
@@ -15,24 +18,22 @@
 //!   hold) and native conservation: nothing in the DEX mints or burns
 //!   native, so a drop in total issuance is native destroyed as dust.
 //! - Every op's result: `Ok`, or an error that is the op's own business
-//!   (`SlippageExceeded`, `BidWindowClosed`, `NotIntentOwner`…). Anything
+//!   (`SlippageExceeded`, `InsufficientShares`…). Anything
 //!   else is a refusal by `balances` or `assets` that the pallet did not
 //!   plan for, or one of its own errors masking one.
-//! - At the end, liveness: far past every deadline, each intent can be
-//!   closed (refunded or slashed), each solver without commitments can
-//!   leave, each LP can withdraw, and every recorded fee can be paid.
+//! - At the end, liveness: each LP can withdraw, and every recorded fee can
+//!   be paid.
 //!
 //! **Modes.** `Mode::today` runs the chain as it is. `Mode::endowed` first
-//! gives the intent escrow, the fee treasury and the fee escrow an ED each,
-//! so the failures that follow only from those accounts having none do not
-//! drown out the rest.
+//! gives the fee escrow an ED, so the failures that follow only from it
+//! having none do not drown out the rest.
 //!
-//! **Where it runs.** `cargo test` runs the properties in seconds.
-//! `survey_*` (ignored) runs many programs without stopping and prints every
+//! **Where it runs.** `survey_*` (ignored) runs many programs without
+//! stopping and prints every
 //! distinct finding with the program that produced it first:
 //! `cargo test -p pallet-vitreus-dex --release -- --ignored survey --nocapture`.
 
-use crate::{mock::*, settlement::IntentStatus, *};
+use crate::{mock::*, *};
 use frame_support::{
     storage::{with_transaction, TransactionOutcome},
     traits::tokens::Preservation,
@@ -61,11 +62,7 @@ const POOL_ASSETS: [u32; 5] = [USDC_ID, VNRG_ID, SUFFICIENT_ID, LAUNCH_ID, FRESH
 /// An account the pallet owns or pays, as an outsider can address it.
 #[derive(Clone, Debug)]
 enum Target {
-    IntentEscrow,
-    FeeTreasury,
     FeeEscrow,
-    /// The escrow of solver id `n` modulo the ids issued.
-    SolverEscrow(u8),
     Pool(u8),
     /// The pre-seed sweep's and default protocol fee's recipient.
     Treasury,
@@ -91,46 +88,11 @@ enum Op {
         pool: u8,
         permille: u16,
     },
-    Register {
-        who: u8,
-    },
-    Deregister {
-        who: u8,
-    },
-    Submit {
-        who: u8,
-        pool: u8,
-        native_in: bool,
-        amount: u128,
-        deadline: u8,
-    },
-    Cancel {
-        intent: u8,
-    },
-    /// Bid `permille` of what settling would pay right now.
-    Commit {
-        who: u8,
-        intent: u8,
-        permille: u16,
-    },
-    Settle {
-        intent: u8,
-    },
-    Slash {
-        who: u8,
-        intent: u8,
-    },
-    Refund {
-        intent: u8,
-    },
     Advance {
         blocks: u8,
     },
     WithdrawProtocolFees,
     ClaimCreatorFees,
-    SetBond {
-        amount: u128,
-    },
     // Outsiders.
     /// Send `amount` of pool asset `asset` (or native, for `None`).
     Donate {
@@ -176,10 +138,7 @@ fn amount() -> impl Strategy<Value = u128> {
 
 fn target() -> impl Strategy<Value = Target> {
     prop_oneof![
-        Just(Target::IntentEscrow),
-        Just(Target::FeeTreasury),
         Just(Target::FeeEscrow),
-        any::<u8>().prop_map(Target::SolverEscrow),
         any::<u8>().prop_map(Target::Pool),
         Just(Target::Treasury),
         Just(Target::Creator),
@@ -194,27 +153,9 @@ fn op(hostile: bool) -> BoxedStrategy<Op> {
             .prop_map(|(who, pool, amount)| Op::AddLiquidity { who, pool, amount }),
         2 => (any::<u8>(), any::<u8>(), prop::sample::select(vec![1u16, 500, 999, 1000]))
             .prop_map(|(who, pool, permille)| Op::RemoveLiquidity { who, pool, permille }),
-        2 => any::<u8>().prop_map(|who| Op::Register { who }),
-        1 => any::<u8>().prop_map(|who| Op::Deregister { who }),
-        6 => (any::<u8>(), any::<u8>(), any::<bool>(), amount(), 1u8..40).prop_map(
-            |(who, pool, native_in, amount, deadline)| Op::Submit {
-                who,
-                pool,
-                native_in,
-                amount,
-                deadline
-            }
-        ),
-        2 => any::<u8>().prop_map(|intent| Op::Cancel { intent }),
-        5 => (any::<u8>(), any::<u8>(), prop::sample::select(vec![500u16, 900, 990, 1000]))
-            .prop_map(|(who, intent, permille)| Op::Commit { who, intent, permille }),
-        5 => any::<u8>().prop_map(|intent| Op::Settle { intent }),
-        2 => (any::<u8>(), any::<u8>()).prop_map(|(who, intent)| Op::Slash { who, intent }),
-        2 => any::<u8>().prop_map(|intent| Op::Refund { intent }),
         3 => (1u8..20).prop_map(|blocks| Op::Advance { blocks }),
         1 => Just(Op::WithdrawProtocolFees),
         1 => Just(Op::ClaimCreatorFees),
-        1 => amount().prop_map(|amount| Op::SetBond { amount }),
     ];
     if !hostile {
         return honest.boxed();
@@ -270,13 +211,7 @@ fn pool_account(asset: u32) -> AccountId {
 
 fn resolve(target: &Target) -> AccountId {
     match target {
-        Target::IntentEscrow => VitreusDex::intent_escrow_account(),
-        Target::FeeTreasury => VitreusDex::protocol_treasury_account(),
         Target::FeeEscrow => VitreusDex::fee_escrow_account(),
-        Target::SolverEscrow(n) => {
-            let issued = NextSolverId::<Test>::get().max(1);
-            VitreusDex::solver_escrow_account(*n as u64 % issued)
-        },
         Target::Pool(n) => pool_account(pool_asset(*n)),
         Target::Treasury => TREASURY,
         Target::Creator => CREATOR,
@@ -320,13 +255,11 @@ fn setup(mode: Mode) {
         &ALICE, kind(LAUNCH_ID), native(), 200_000 * UNIT, 1_000 * UNIT, 3
     ));
     if mode.endowed {
-        for who in [
-            VitreusDex::intent_escrow_account(),
-            VitreusDex::protocol_treasury_account(),
+        assert_ok!(Balances::force_set_balance(
+            root(),
             VitreusDex::fee_escrow_account(),
-        ] {
-            assert_ok!(Balances::force_set_balance(root(), who, RUNTIME_ED));
-        }
+            RUNTIME_ED
+        ));
     }
 }
 
@@ -360,31 +293,6 @@ fn ordinary(op: &'static str, e: &DispatchError) -> bool {
         "swap" => own(&[SlippageExceeded, InsufficientLiquidity]),
         "add_liquidity" => own(&[SlippageExceeded, InsufficientInitialLiquidity]),
         "remove_liquidity" => own(&[InsufficientShares, PoolLocked, SlippageExceeded]),
-        "register_solver" => own(&[SolverAlreadyRegistered]),
-        "deregister_solver" => own(&[SolverNotRegistered, SolverNotActive, ActiveCommitmentsExist]),
-        "submit_intent" => own(&[InvalidDeadline]),
-        "cancel_intent" => own(&[IntentNotFound, IntentNotOpen]),
-        "commit_fill" => own(&[
-            SolverNotRegistered,
-            SolverNotActive,
-            IntentNotFound,
-            IntentNotOpen,
-            BelowMinAmountOut,
-            BidWindowClosed,
-            IntentExpired,
-            BidNotBetter,
-        ]),
-        // A trade that no longer fills the bid is the solver's market risk.
-        "settle_intent" => own(&[
-            IntentNotCommitted,
-            NotCommittedSolver,
-            SettlementWindowPassed,
-            SlippageExceeded,
-            InsufficientLiquidity,
-        ]),
-        "slash_solver" => own(&[IntentNotCommitted, SettlementWindowNotPassed]),
-        "refund_expired_intent" => own(&[IntentNotFound, IntentNotOpen, DeadlineNotPassed]),
-        "set_solver_bond_amount" => own(&[InvalidAmount]),
         _ => false,
     }
 }
@@ -419,10 +327,6 @@ impl World {
     /// Run one op; `None` when the op had nothing to act on.
     fn step(&mut self, op: &Op) -> Option<(&'static str, DispatchResult)> {
         let signed = |who: AccountId| RuntimeOrigin::signed(who);
-        let intents = NextIntentId::<Test>::get();
-        let intent_id = |i: u8| (intents > 0).then(|| i as u64 % intents);
-        let solvers: Vec<AccountId> =
-            Solvers::<Test>::iter_values().filter(|s| s.active).map(|s| s.account).collect();
         Some(match op.clone() {
             Op::Swap { who, pool, native_in, amount } => {
                 let who = actor(who);
@@ -462,58 +366,6 @@ impl World {
                     VitreusDex::remove_liquidity(signed(who), native(), asset, shares, 0, 0),
                 )
             },
-            Op::Register { who } => {
-                ("register_solver", VitreusDex::register_solver(signed(actor(who))))
-            },
-            Op::Deregister { who } => {
-                ("deregister_solver", VitreusDex::deregister_solver(signed(actor(who))))
-            },
-            Op::Submit { who, pool, native_in, amount, deadline } => {
-                let who = actor(who);
-                let asset = kind(pool_asset(pool));
-                let (a_in, a_out) = if native_in { (native(), asset) } else { (asset, native()) };
-                let amount = affordable(&who, &a_in, amount)?;
-                (
-                    "submit_intent",
-                    VitreusDex::submit_intent(
-                        signed(who),
-                        a_in,
-                        a_out,
-                        amount,
-                        1,
-                        System::block_number() + deadline as u64,
-                    ),
-                )
-            },
-            Op::Cancel { intent } => {
-                let id = intent_id(intent)?;
-                let owner = Intents::<Test>::get(id)?.user;
-                ("cancel_intent", VitreusDex::cancel_intent(signed(owner), id))
-            },
-            Op::Commit { who, intent, permille } => {
-                let id = intent_id(intent)?;
-                let i = Intents::<Test>::get(id)?;
-                let out = settlement_quote(&i).unwrap_or(1);
-                let prior = FillCommitments::<Test>::get(id).map(|c| c.committed_amount_out);
-                let bid = (out / 1000 * permille as u128).max(prior.map_or(1, |p| p + 1));
-                let solver = *solvers.get(who as usize % solvers.len().max(1))?;
-                ("commit_fill", VitreusDex::commit_fill(signed(solver), id, bid))
-            },
-            Op::Settle { intent } => {
-                let id = intent_id(intent)?;
-                let c = FillCommitments::<Test>::get(id)?;
-                ("settle_intent", VitreusDex::settle_intent(signed(c.solver_account), id))
-            },
-            Op::Slash { who, intent } => {
-                let id = intent_id(intent)?;
-                FillCommitments::<Test>::get(id)?;
-                ("slash_solver", VitreusDex::slash_solver(signed(actor(who)), id))
-            },
-            Op::Refund { intent } => {
-                let id = intent_id(intent)?;
-                let owner = Intents::<Test>::get(id)?.user;
-                ("refund_expired_intent", VitreusDex::refund_expired_intent(signed(owner), id))
-            },
             Op::Advance { blocks } => {
                 System::set_block_number(System::block_number() + blocks as u64);
                 return None;
@@ -534,10 +386,6 @@ impl World {
                     VitreusDex::claim_pool_creator_fees(signed(CREATOR), kind(LAUNCH_ID)),
                 )
             },
-            Op::SetBond { amount } => (
-                "set_solver_bond_amount",
-                VitreusDex::set_solver_bond_amount(RuntimeOrigin::root(), amount),
-            ),
             Op::Donate { who, target, asset, amount } => {
                 let who = actor(who);
                 let to = resolve(&target);
@@ -614,7 +462,7 @@ impl World {
         self.drain();
     }
 
-    /// Far past every deadline and window: everything that must close.
+    /// Everything that must close.
     fn drain(&mut self) {
         System::set_block_number(System::block_number() + 1_000);
         let stuck = |what: &'static str, r: DispatchResult, me: &mut Self| {
@@ -622,31 +470,6 @@ impl World {
                 me.note(Finding::Stuck { what, error: format!("{e:?}") });
             }
         };
-        let ids: Vec<u64> = Intents::<Test>::iter_keys().collect();
-        for id in ids {
-            let Some(i) = Intents::<Test>::get(id) else { continue };
-            match i.status {
-                IntentStatus::Open => stuck(
-                    "an open intent's refund",
-                    VitreusDex::refund_expired_intent(RuntimeOrigin::signed(i.user), id),
-                    self,
-                ),
-                IntentStatus::Committed => stuck(
-                    "a committed intent's slash",
-                    VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), id),
-                    self,
-                ),
-                _ => {},
-            }
-        }
-        let solvers: Vec<_> = Solvers::<Test>::iter_values().filter(|s| s.active).collect();
-        for s in solvers {
-            stuck(
-                "an idle solver's exit",
-                VitreusDex::deregister_solver(RuntimeOrigin::signed(s.account)),
-                self,
-            );
-        }
         if ProtocolFeesUnclaimed::<Test>::get() > 0 {
             stuck(
                 "the protocol fee withdrawal",
@@ -710,36 +533,11 @@ fn affordable(who: &AccountId, asset: &NativeOrAssetId, amount: u128) -> Option<
     (a > 0).then_some(a)
 }
 
-/// What settling `intent` would pay right now, swapping from the escrow.
-fn settlement_quote(
-    i: &crate::settlement::Intent<AccountId, NativeOrAssetId, u128, u64>,
-) -> Option<u128> {
-    let escrow = VitreusDex::intent_escrow_account();
-    with_transaction(|| {
-        let out = VitreusDex::do_swap(
-            &escrow,
-            i.token_in.clone(),
-            i.token_out.clone(),
-            i.amount_in,
-            1,
-            &escrow,
-            true,
-            Preservation::Expendable,
-        );
-        TransactionOutcome::Rollback(out)
-    })
-    .ok()
-}
-
 /// One-unit balances of fresh non-sufficient assets on `who` until
 /// pallet-assets would refuse to open another account there.
 fn fill_consumer_slots(who: AccountId) {
     while frame_system::Pallet::<Test>::can_accrue_consumers(&who, 2) {
-        let id = (300..RESERVED_ASSET_BASE)
-            .find(|id| {
-                !<Assets as frame_support::traits::fungibles::Inspect<AccountId>>::asset_exists(*id)
-            })
-            .expect("free asset id");
+        let id = crate::testing::next_free_asset_id::<Test>(300);
         if Assets::force_create(RuntimeOrigin::root(), id, DAVE, false, 1).is_err()
             || Assets::mint(RuntimeOrigin::signed(DAVE), id, who, 1).is_err()
         {
@@ -832,41 +630,4 @@ fn survey_endowed_honest() {
 #[ignore = "a survey, not a property: run by hand with --nocapture"]
 fn survey_endowed_hostile() {
     survey(Mode::endowed(true), 400);
-}
-
-// ---- properties -------------------------------------------------------------
-
-fn cases() -> u32 {
-    std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(32)
-}
-
-fn judge(mode: Mode, ops: &[Op]) -> Result<(), TestCaseError> {
-    let findings = run_program(mode, ops);
-    prop_assert!(
-        findings.is_empty(),
-        "\n{}\nprogram:\n{}",
-        findings.keys().map(|f| format!("  {f:?}")).collect::<Vec<_>>().join("\n"),
-        ops.iter()
-            .enumerate()
-            .map(|(i, o)| format!("  {i:>2}. {o:?}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
-    Ok(())
-}
-
-proptest! {
-    #![proptest_config(RunnerConfig { cases: cases(), max_shrink_iters: 4096, ..RunnerConfig::default() })]
-
-    /// The chain as it is, with outsiders acting on every pallet account.
-    #[test]
-    fn fuzz_runtime_like_with_outsiders(ops in program(true)) {
-        judge(Mode::today(true), &ops)?;
-    }
-
-    /// The same, from a chain whose escrows each hold an ED.
-    #[test]
-    fn fuzz_endowed_escrows_with_outsiders(ops in program(true)) {
-        judge(Mode::endowed(true), &ops)?;
-    }
 }

@@ -196,9 +196,6 @@ impl pallet_vitreus_dex::Config for Test {
     type CreatorFeeRecipient = LaunchpadCreators;
     // D9: the DEX pushes the treasury slice into this pallet.
     type TreasurySink = LaunchTreasury;
-    type DefaultBidWindowBlocks = ConstU64<10>;
-    type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = ConstU128<1_000_000_000_000>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();

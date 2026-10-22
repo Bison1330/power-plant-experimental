@@ -24,7 +24,7 @@ fn vnrg() -> NativeOrAssetId {
 /// Register `who` as a solver and return the assigned id.
 fn register_solver_for(who: AccountId) -> u64 {
     let id = NextSolverId::<Test>::get();
-    assert_ok!(VitreusDex::register_solver(RuntimeOrigin::signed(who)));
+    assert_ok!(Marketplace::register_solver(RuntimeOrigin::signed(who)));
     id
 }
 
@@ -35,10 +35,10 @@ fn register_solver_for(who: AccountId) -> u64 {
 #[test]
 fn set_bid_window_works_under_manage_origin() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::set_bid_window(RuntimeOrigin::root(), 42));
+        assert_ok!(Marketplace::set_bid_window(RuntimeOrigin::root(), 42));
         assert_eq!(BidWindowBlocks::<Test>::get(), Some(42));
 
-        System::assert_last_event(RuntimeEvent::VitreusDex(Event::BidWindowUpdated {
+        System::assert_last_event(RuntimeEvent::Marketplace(Event::BidWindowUpdated {
             new_value: 42,
         }));
     });
@@ -48,7 +48,7 @@ fn set_bid_window_works_under_manage_origin() {
 fn set_bid_window_rejects_non_manage_origin() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::set_bid_window(RuntimeOrigin::signed(ALICE), 42),
+            Marketplace::set_bid_window(RuntimeOrigin::signed(ALICE), 42),
             sp_runtime::DispatchError::BadOrigin,
         );
     });
@@ -58,7 +58,7 @@ fn set_bid_window_rejects_non_manage_origin() {
 fn set_bid_window_rejects_zero() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::set_bid_window(RuntimeOrigin::root(), 0),
+            Marketplace::set_bid_window(RuntimeOrigin::root(), 0),
             Error::<Test>::InvalidAmount,
         );
     });
@@ -67,7 +67,7 @@ fn set_bid_window_rejects_zero() {
 #[test]
 fn set_settlement_window_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::set_settlement_window(RuntimeOrigin::root(), 7));
+        assert_ok!(Marketplace::set_settlement_window(RuntimeOrigin::root(), 7));
         assert_eq!(SettlementWindowBlocks::<Test>::get(), Some(7));
     });
 }
@@ -75,7 +75,7 @@ fn set_settlement_window_works() {
 #[test]
 fn set_solver_bond_amount_works() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::set_solver_bond_amount(RuntimeOrigin::root(), 2_000_000_000_000,));
+        assert_ok!(Marketplace::set_solver_bond_amount(RuntimeOrigin::root(), 2_000_000_000_000,));
         assert_eq!(SolverBondAmount::<Test>::get(), Some(2_000_000_000_000),);
     });
 }
@@ -88,7 +88,7 @@ fn set_solver_bond_amount_works() {
 fn current_bid_window_falls_back_to_default_when_unset() {
     new_test_ext().execute_with(|| {
         assert_eq!(BidWindowBlocks::<Test>::get(), None);
-        assert_eq!(VitreusDex::current_bid_window(), 10);
+        assert_eq!(Marketplace::current_bid_window(), 10);
     });
 }
 
@@ -96,21 +96,21 @@ fn current_bid_window_falls_back_to_default_when_unset() {
 fn current_bid_window_uses_storage_when_set() {
     new_test_ext().execute_with(|| {
         BidWindowBlocks::<Test>::put(99);
-        assert_eq!(VitreusDex::current_bid_window(), 99);
+        assert_eq!(Marketplace::current_bid_window(), 99);
     });
 }
 
 #[test]
 fn current_settlement_window_falls_back_to_default() {
     new_test_ext().execute_with(|| {
-        assert_eq!(VitreusDex::current_settlement_window(), 5);
+        assert_eq!(Marketplace::current_settlement_window(), 5);
     });
 }
 
 #[test]
 fn current_solver_bond_falls_back_to_default() {
     new_test_ext().execute_with(|| {
-        assert_eq!(VitreusDex::current_solver_bond(), 1_000_000_000_000);
+        assert_eq!(Marketplace::current_solver_bond(), 1_000_000_000_000);
     });
 }
 
@@ -121,8 +121,8 @@ fn current_solver_bond_falls_back_to_default() {
 #[test]
 fn solver_escrow_accounts_are_distinct_per_solver_id() {
     new_test_ext().execute_with(|| {
-        let a = VitreusDex::solver_escrow_account(1);
-        let b = VitreusDex::solver_escrow_account(2);
+        let a = Marketplace::solver_escrow_account(1);
+        let b = Marketplace::solver_escrow_account(2);
         assert_ne!(a, b, "distinct solver ids must yield distinct escrow accounts");
     });
 }
@@ -130,17 +130,42 @@ fn solver_escrow_accounts_are_distinct_per_solver_id() {
 #[test]
 fn solver_escrow_account_is_deterministic() {
     new_test_ext().execute_with(|| {
-        let first = VitreusDex::solver_escrow_account(42);
-        let second = VitreusDex::solver_escrow_account(42);
+        let first = Marketplace::solver_escrow_account(42);
+        let second = Marketplace::solver_escrow_account(42);
         assert_eq!(first, second, "same solver id must yield same escrow account");
+    });
+}
+
+/// On twenty-byte accounts a seed that led with the id derived the
+/// pallet's own account for id 0 (an all-zero seed truncates to the same
+/// bytes). Every account the marketplace or the DEX under it derives must
+/// be its own.
+#[test]
+fn no_solver_escrow_derives_another_pallet_account() {
+    new_test_ext().execute_with(|| {
+        let mut seen = vec![
+            Marketplace::account_id(),
+            Marketplace::intent_escrow_account(),
+            Marketplace::protocol_treasury_account(),
+            VitreusDex::account_id(),
+            VitreusDex::fee_escrow_account(),
+            VitreusDex::pool_account_for(NativeOrAssetId::Native, usdc()),
+            VitreusDex::pool_account_for(NativeOrAssetId::Native, vnrg()),
+        ];
+        for id in [0u64, 1, 2, 255, 256, u32::MAX as u64] {
+            seen.push(Marketplace::solver_escrow_account(id));
+        }
+        for (i, a) in seen.iter().enumerate() {
+            assert!(!seen[i + 1..].contains(a), "{a:?} is derived twice");
+        }
     });
 }
 
 #[test]
 fn intent_escrow_is_distinct_from_solver_escrows() {
     new_test_ext().execute_with(|| {
-        let intent_acc = VitreusDex::intent_escrow_account();
-        let solver_acc = VitreusDex::solver_escrow_account(0);
+        let intent_acc = Marketplace::intent_escrow_account();
+        let solver_acc = Marketplace::solver_escrow_account(0);
         assert_ne!(intent_acc, solver_acc);
     });
 }
@@ -148,9 +173,9 @@ fn intent_escrow_is_distinct_from_solver_escrows() {
 #[test]
 fn protocol_treasury_is_distinct_from_escrows() {
     new_test_ext().execute_with(|| {
-        let treasury = VitreusDex::protocol_treasury_account();
-        assert_ne!(treasury, VitreusDex::intent_escrow_account());
-        assert_ne!(treasury, VitreusDex::solver_escrow_account(0));
+        let treasury = Marketplace::protocol_treasury_account();
+        assert_ne!(treasury, Marketplace::intent_escrow_account());
+        assert_ne!(treasury, Marketplace::solver_escrow_account(0));
     });
 }
 
@@ -186,7 +211,7 @@ fn register_solver_rejects_duplicate_while_active() {
     new_test_ext().execute_with(|| {
         register_solver_for(ALICE);
         assert_noop!(
-            VitreusDex::register_solver(RuntimeOrigin::signed(ALICE)),
+            Marketplace::register_solver(RuntimeOrigin::signed(ALICE)),
             Error::<Test>::SolverAlreadyRegistered,
         );
     });
@@ -196,13 +221,13 @@ fn register_solver_rejects_duplicate_while_active() {
 fn deregister_solver_refunds_bond_and_deactivates() {
     new_test_ext().execute_with(|| {
         let id = register_solver_for(ALICE);
-        assert_ok!(VitreusDex::deregister_solver(RuntimeOrigin::signed(ALICE)));
+        assert_ok!(Marketplace::deregister_solver(RuntimeOrigin::signed(ALICE)));
 
         let solver = Solvers::<Test>::get(id).expect("still indexed after deregister");
         assert!(!solver.active);
         assert_eq!(solver.bond, 0);
 
-        System::assert_has_event(RuntimeEvent::VitreusDex(Event::SolverDeregistered {
+        System::assert_has_event(RuntimeEvent::Marketplace(Event::SolverDeregistered {
             solver_id: id,
             account: ALICE,
             bond_refunded: 1_000_000_000_000,
@@ -214,7 +239,7 @@ fn deregister_solver_refunds_bond_and_deactivates() {
 fn deregister_solver_fails_if_not_registered() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::deregister_solver(RuntimeOrigin::signed(ALICE)),
+            Marketplace::deregister_solver(RuntimeOrigin::signed(ALICE)),
             Error::<Test>::SolverNotRegistered,
         );
     });
@@ -224,7 +249,7 @@ fn deregister_solver_fails_if_not_registered() {
 fn register_after_deregister_gives_fresh_solver_id() {
     new_test_ext().execute_with(|| {
         let first_id = register_solver_for(ALICE);
-        assert_ok!(VitreusDex::deregister_solver(RuntimeOrigin::signed(ALICE)));
+        assert_ok!(Marketplace::deregister_solver(RuntimeOrigin::signed(ALICE)));
         let second_id = register_solver_for(ALICE);
 
         assert_ne!(first_id, second_id);
@@ -247,7 +272,7 @@ fn submit_intent_escrows_token_in_and_stores_intent() {
         let now = System::block_number();
         let deadline = now + 100;
 
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             vnrg(),
@@ -274,7 +299,7 @@ fn submit_intent_escrows_token_in_and_stores_intent() {
 fn submit_intent_rejects_zero_amount_in() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::submit_intent(
+            Marketplace::submit_intent(
                 RuntimeOrigin::signed(ALICE),
                 usdc(),
                 vnrg(),
@@ -291,7 +316,7 @@ fn submit_intent_rejects_zero_amount_in() {
 fn submit_intent_rejects_same_token() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::submit_intent(
+            Marketplace::submit_intent(
                 RuntimeOrigin::signed(ALICE),
                 usdc(),
                 usdc(),
@@ -310,7 +335,7 @@ fn submit_intent_rejects_past_deadline() {
         let now = System::block_number();
         System::set_block_number(now + 10);
         assert_noop!(
-            VitreusDex::submit_intent(
+            Marketplace::submit_intent(
                 RuntimeOrigin::signed(ALICE),
                 usdc(),
                 vnrg(),
@@ -326,7 +351,7 @@ fn submit_intent_rejects_past_deadline() {
 #[test]
 fn cancel_intent_refunds_and_marks_cancelled() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             vnrg(),
@@ -335,7 +360,7 @@ fn cancel_intent_refunds_and_marks_cancelled() {
             System::block_number() + 100,
         ));
 
-        assert_ok!(VitreusDex::cancel_intent(RuntimeOrigin::signed(ALICE), 0));
+        assert_ok!(Marketplace::cancel_intent(RuntimeOrigin::signed(ALICE), 0));
 
         let intent = Intents::<Test>::get(0).expect("still indexed");
         assert_eq!(intent.status, IntentStatus::Cancelled);
@@ -346,7 +371,7 @@ fn cancel_intent_refunds_and_marks_cancelled() {
 #[test]
 fn cancel_intent_rejects_non_owner() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             vnrg(),
@@ -356,7 +381,7 @@ fn cancel_intent_rejects_non_owner() {
         ));
 
         assert_noop!(
-            VitreusDex::cancel_intent(RuntimeOrigin::signed(BOB), 0),
+            Marketplace::cancel_intent(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::NotIntentOwner,
         );
     });
@@ -366,7 +391,7 @@ fn cancel_intent_rejects_non_owner() {
 fn cancel_intent_rejects_unknown_intent() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            VitreusDex::cancel_intent(RuntimeOrigin::signed(ALICE), 999),
+            Marketplace::cancel_intent(RuntimeOrigin::signed(ALICE), 999),
             Error::<Test>::IntentNotFound,
         );
     });
@@ -375,15 +400,15 @@ fn cancel_intent_rejects_unknown_intent() {
 #[test]
 fn events_for_register_intent_cancel_have_correct_payloads() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::register_solver(RuntimeOrigin::signed(ALICE)));
-        System::assert_has_event(RuntimeEvent::VitreusDex(Event::SolverRegistered {
+        assert_ok!(Marketplace::register_solver(RuntimeOrigin::signed(ALICE)));
+        System::assert_has_event(RuntimeEvent::Marketplace(Event::SolverRegistered {
             solver_id: 0,
             account: ALICE,
             bond: 1_000_000_000_000,
         }));
 
         let deadline = System::block_number() + 100;
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             vnrg(),
@@ -391,7 +416,7 @@ fn events_for_register_intent_cancel_have_correct_payloads() {
             450_000,
             deadline,
         ));
-        System::assert_has_event(RuntimeEvent::VitreusDex(Event::IntentSubmitted {
+        System::assert_has_event(RuntimeEvent::Marketplace(Event::IntentSubmitted {
             intent_id: 0,
             user: ALICE,
             token_in: usdc(),
@@ -401,8 +426,8 @@ fn events_for_register_intent_cancel_have_correct_payloads() {
             deadline,
         }));
 
-        assert_ok!(VitreusDex::cancel_intent(RuntimeOrigin::signed(ALICE), 0));
-        System::assert_has_event(RuntimeEvent::VitreusDex(Event::IntentCancelled {
+        assert_ok!(Marketplace::cancel_intent(RuntimeOrigin::signed(ALICE), 0));
+        System::assert_has_event(RuntimeEvent::Marketplace(Event::IntentCancelled {
             intent_id: 0,
             user: ALICE,
         }));
@@ -448,7 +473,7 @@ fn setup_pool_native_usdc() {
 fn commit_fill_marks_intent_committed_and_increments_active() {
     new_test_ext().execute_with(|| {
         let solver_id = register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -457,7 +482,7 @@ fn commit_fill_marks_intent_committed_and_increments_active() {
             System::block_number() + 100,
         ));
 
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500,));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500,));
 
         let intent = Intents::<Test>::get(0).expect("present");
         assert_eq!(intent.status, IntentStatus::Committed);
@@ -475,7 +500,7 @@ fn commit_fill_marks_intent_committed_and_increments_active() {
 fn commit_fill_rejects_below_min_amount_out() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -485,7 +510,7 @@ fn commit_fill_rejects_below_min_amount_out() {
         ));
 
         assert_noop!(
-            VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 8_000),
+            Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 8_000),
             Error::<Test>::BelowMinAmountOut,
         );
     });
@@ -494,7 +519,7 @@ fn commit_fill_rejects_below_min_amount_out() {
 #[test]
 fn commit_fill_rejects_unregistered_solver() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -504,7 +529,7 @@ fn commit_fill_rejects_unregistered_solver() {
         ));
 
         assert_noop!(
-            VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500),
+            Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500),
             Error::<Test>::SolverNotRegistered,
         );
     });
@@ -515,7 +540,7 @@ fn commit_fill_overbid_replaces_prior_and_fixes_active_counts() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
         register_solver_for(CHARLIE);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -524,8 +549,8 @@ fn commit_fill_overbid_replaces_prior_and_fixes_active_counts() {
             System::block_number() + 100,
         ));
 
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_700));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_700));
 
         let commitment = FillCommitments::<Test>::get(0).expect("present");
         assert_eq!(commitment.committed_amount_out, 9_700);
@@ -543,7 +568,7 @@ fn commit_fill_rejects_overbid_not_strictly_better() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
         register_solver_for(CHARLIE);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -552,9 +577,9 @@ fn commit_fill_rejects_overbid_not_strictly_better() {
             System::block_number() + 100,
         ));
 
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
         assert_noop!(
-            VitreusDex::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_500),
+            Marketplace::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_500),
             Error::<Test>::BidNotBetter,
         );
     });
@@ -564,7 +589,7 @@ fn commit_fill_rejects_overbid_not_strictly_better() {
 fn commit_fill_rejects_past_bid_window() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -579,7 +604,7 @@ fn commit_fill_rejects_past_bid_window() {
         System::set_block_number(now + 11);
 
         assert_noop!(
-            VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500),
+            Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500),
             Error::<Test>::BidWindowClosed,
         );
     });
@@ -595,7 +620,7 @@ fn settle_intent_happy_path_distributes_correctly() {
         setup_pool_native_usdc();
         register_solver_for(BOB);
 
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -603,11 +628,11 @@ fn settle_intent_happy_path_distributes_correctly() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         let alice_native_before = pallet_balances::Pallet::<Test>::free_balance(ALICE);
 
-        assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(Marketplace::settle_intent(RuntimeOrigin::signed(BOB), 0));
 
         let intent = Intents::<Test>::get(0).expect("present");
         assert_eq!(intent.status, IntentStatus::Settled);
@@ -633,7 +658,7 @@ fn settle_intent_rejects_non_committed_solver() {
         register_solver_for(BOB);
         register_solver_for(CHARLIE);
 
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -641,10 +666,10 @@ fn settle_intent_rejects_non_committed_solver() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         assert_noop!(
-            VitreusDex::settle_intent(RuntimeOrigin::signed(CHARLIE), 0),
+            Marketplace::settle_intent(RuntimeOrigin::signed(CHARLIE), 0),
             Error::<Test>::NotCommittedSolver,
         );
     });
@@ -655,7 +680,7 @@ fn settle_intent_rejects_past_settlement_window() {
     new_test_ext().execute_with(|| {
         setup_pool_native_usdc();
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -663,14 +688,14 @@ fn settle_intent_rejects_past_settlement_window() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         // Default settlement window is 5 blocks.
         let now = System::block_number();
         System::set_block_number(now + 6);
 
         assert_noop!(
-            VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), 0),
+            Marketplace::settle_intent(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::SettlementWindowPassed,
         );
     });
@@ -684,7 +709,7 @@ fn settle_intent_rejects_past_settlement_window() {
 fn slash_solver_happy_path_pays_slasher_and_refunds_user() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -692,7 +717,7 @@ fn slash_solver_happy_path_pays_slasher_and_refunds_user() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         let alice_usdc_before = pallet_assets::Pallet::<Test>::balance(USDC_ID, ALICE);
         let charlie_native_before = pallet_balances::Pallet::<Test>::free_balance(CHARLIE);
@@ -700,7 +725,7 @@ fn slash_solver_happy_path_pays_slasher_and_refunds_user() {
         let now = System::block_number();
         System::set_block_number(now + 10);
 
-        assert_ok!(VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(Marketplace::slash_solver(RuntimeOrigin::signed(CHARLIE), 0));
 
         let bob = Solvers::<Test>::get(0).expect("present");
         assert!(!bob.active);
@@ -725,7 +750,7 @@ fn slash_solver_happy_path_pays_slasher_and_refunds_user() {
 fn slash_solver_rejects_before_settlement_window_passes() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -733,10 +758,10 @@ fn slash_solver_rejects_before_settlement_window_passes() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         assert_noop!(
-            VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), 0),
+            Marketplace::slash_solver(RuntimeOrigin::signed(CHARLIE), 0),
             Error::<Test>::SettlementWindowNotPassed,
         );
     });
@@ -747,7 +772,7 @@ fn slash_solver_rejects_if_already_settled() {
     new_test_ext().execute_with(|| {
         setup_pool_native_usdc();
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -755,14 +780,14 @@ fn slash_solver_rejects_if_already_settled() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
-        assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), 0));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::settle_intent(RuntimeOrigin::signed(BOB), 0));
 
         let now = System::block_number();
         System::set_block_number(now + 10);
 
         assert_noop!(
-            VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), 0),
+            Marketplace::slash_solver(RuntimeOrigin::signed(CHARLIE), 0),
             Error::<Test>::IntentNotCommitted,
         );
     });
@@ -775,7 +800,7 @@ fn slash_solver_rejects_if_already_settled() {
 #[test]
 fn refund_expired_intent_works_if_never_committed() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -788,7 +813,7 @@ fn refund_expired_intent_works_if_never_committed() {
 
         System::set_block_number(System::block_number() + 10);
 
-        assert_ok!(VitreusDex::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0));
+        assert_ok!(Marketplace::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0));
 
         let alice_usdc_after = pallet_assets::Pallet::<Test>::balance(USDC_ID, ALICE);
         assert_eq!(alice_usdc_after - alice_usdc_before, 10_000);
@@ -802,7 +827,7 @@ fn refund_expired_intent_works_if_never_committed() {
 fn refund_expired_intent_rejects_if_committed() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -810,12 +835,12 @@ fn refund_expired_intent_rejects_if_committed() {
             9_000,
             System::block_number() + 5,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
 
         System::set_block_number(System::block_number() + 10);
 
         assert_noop!(
-            VitreusDex::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0),
+            Marketplace::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0),
             Error::<Test>::IntentNotOpen,
         );
     });
@@ -824,7 +849,7 @@ fn refund_expired_intent_rejects_if_committed() {
 #[test]
 fn refund_expired_intent_rejects_non_owner() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -836,7 +861,7 @@ fn refund_expired_intent_rejects_non_owner() {
         System::set_block_number(System::block_number() + 10);
 
         assert_noop!(
-            VitreusDex::refund_expired_intent(RuntimeOrigin::signed(BOB), 0),
+            Marketplace::refund_expired_intent(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::NotIntentOwner,
         );
     });
@@ -845,7 +870,7 @@ fn refund_expired_intent_rejects_non_owner() {
 #[test]
 fn refund_expired_intent_rejects_before_deadline() {
     new_test_ext().execute_with(|| {
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -855,7 +880,7 @@ fn refund_expired_intent_rejects_before_deadline() {
         ));
 
         assert_noop!(
-            VitreusDex::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0),
+            Marketplace::refund_expired_intent(RuntimeOrigin::signed(ALICE), 0),
             Error::<Test>::DeadlineNotPassed,
         );
     });
@@ -872,7 +897,7 @@ fn end_to_end_two_solvers_overbid_settle() {
         register_solver_for(BOB);
         register_solver_for(CHARLIE);
 
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -881,14 +906,14 @@ fn end_to_end_two_solvers_overbid_settle() {
             System::block_number() + 100,
         ));
 
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_200));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_600));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_200));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(CHARLIE), 0, 9_600));
 
         assert_noop!(
-            VitreusDex::settle_intent(RuntimeOrigin::signed(BOB), 0),
+            Marketplace::settle_intent(RuntimeOrigin::signed(BOB), 0),
             Error::<Test>::NotCommittedSolver,
         );
-        assert_ok!(VitreusDex::settle_intent(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(Marketplace::settle_intent(RuntimeOrigin::signed(CHARLIE), 0));
 
         let charlie = Solvers::<Test>::get(1).expect("present");
         assert_eq!(charlie.reputation, REPUTATION_FILL_REWARD);
@@ -912,7 +937,7 @@ fn end_to_end_two_solvers_overbid_settle() {
 fn r6_a_solver_raising_its_own_bid_locks_its_bond_forever() {
     new_test_ext().execute_with(|| {
         register_solver_for(BOB);
-        assert_ok!(VitreusDex::submit_intent(
+        assert_ok!(Marketplace::submit_intent(
             RuntimeOrigin::signed(ALICE),
             usdc(),
             NativeOrAssetId::Native,
@@ -920,8 +945,8 @@ fn r6_a_solver_raising_its_own_bid_locks_its_bond_forever() {
             9_000,
             System::block_number() + 100,
         ));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
-        assert_ok!(VitreusDex::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_700));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_500));
+        assert_ok!(Marketplace::commit_fill(RuntimeOrigin::signed(BOB), 0, 9_700));
         assert_eq!(
             Solvers::<Test>::get(0).expect("present").active_commitments,
             1,
@@ -930,7 +955,7 @@ fn r6_a_solver_raising_its_own_bid_locks_its_bond_forever() {
         // The intent goes away without Bob settling: Alice's deadline passes
         // and Bob is slashed, which is the path that must leave him at zero.
         System::set_block_number(System::block_number() + 200);
-        assert_ok!(VitreusDex::slash_solver(RuntimeOrigin::signed(CHARLIE), 0));
+        assert_ok!(Marketplace::slash_solver(RuntimeOrigin::signed(CHARLIE), 0));
         assert_eq!(
             Solvers::<Test>::get(0).expect("present").active_commitments,
             0,

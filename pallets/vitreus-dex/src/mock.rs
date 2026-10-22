@@ -5,30 +5,14 @@ use crate as pallet_vitreus_dex;
 
 use frame_support::{
     construct_runtime, derive_impl, parameter_types,
-    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32, ConstU64},
+    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32},
 };
 use frame_system::{EnsureRoot, EnsureSigned};
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
-/// Twenty-byte account ids, as on the runtime (`AccountId20`): sub-accounts
-/// derived from the pallet id truncate exactly as they do there.
-pub type AccountId = sp_core::H160;
-pub const fn acc(b: u8) -> AccountId {
-    sp_core::H160([b; 20])
-}
-
-pub const ALICE: AccountId = acc(1);
-pub const BOB: AccountId = acc(2);
-pub const CHARLIE: AccountId = acc(3);
-
-pub const USDC_ID: u32 = 1;
-pub const VNRG_ID: u32 = 2;
-/// Account that receives pre-seed sweeps (stands in for the treasury).
-pub const TREASURY: AccountId = acc(99);
-/// Asset ids at or above this are "reserved" in the mock (launchpad range).
-pub const RESERVED_ASSET_BASE: u32 = 1_000;
+pub use crate::testing::*;
 
 construct_runtime!(
     pub enum Test
@@ -98,7 +82,6 @@ parameter_types! {
     pub static ExistentialDeposit: u128 = 1;
     pub static AssetDeposit: u128 = 0;
     pub static AssetAccountDeposit: u128 = 0;
-    pub static DefaultSolverBondAmount: u128 = 1_000_000_000_000;
 }
 
 parameter_types! {
@@ -112,8 +95,6 @@ parameter_types! {
 /// D4: the creator on record for a reserved asset in tests (stands in for
 /// the launchpad's `creator_fee_recipient`). `LAUNCH_ID` → `CREATOR`;
 /// everything else has no creator.
-pub const CREATOR: AccountId = acc(77);
-pub const LAUNCH_ID: u32 = RESERVED_ASSET_BASE + 1;
 pub struct MockCreators;
 impl crate::CreatorFeeRecipient<NativeOrAssetId, AccountId> for MockCreators {
     fn creator_fee_recipient(asset: &NativeOrAssetId) -> Option<AccountId> {
@@ -128,7 +109,6 @@ impl crate::CreatorFeeRecipient<NativeOrAssetId, AccountId> for MockCreators {
 /// D9: a recording treasury sink. `SINK_VAULT` is the account the launch
 /// asset's treasury slice is pushed to (`None` = no treasury, fold into
 /// protocol); `SINK_NOTED` is every `(asset id, amount)` the DEX reported.
-pub const VAULT: AccountId = acc(88);
 pub struct MockSink;
 impl crate::TreasurySink<NativeOrAssetId, AccountId, u128> for MockSink {
     fn account_for(asset: &NativeOrAssetId) -> Option<AccountId> {
@@ -193,9 +173,6 @@ impl Config for Test {
     type DefaultProtocolFeeRecipient = ExcessRecipient;
     type CreatorFeeRecipient = MockCreators;
     type TreasurySink = MockSink;
-    type DefaultBidWindowBlocks = ConstU64<10>;
-    type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = DefaultSolverBondAmount;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = MockBenchHelper;
@@ -206,14 +183,12 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     ExistentialDeposit::set(1);
     AssetDeposit::set(0);
     AssetAccountDeposit::set(0);
-    DefaultSolverBondAmount::set(1_000_000_000_000);
 
     let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 
     pallet_balances::GenesisConfig::<Test> {
         dev_accounts: None,
-        // 10× the default solver bond (1e12) so tests can run register +
-        // deregister + re-register flows without hitting ED or balance limits.
+        // Enough for every flow here without hitting ED or balance limits.
         balances: vec![
             (ALICE, 10_000_000_000_000),
             (BOB, 10_000_000_000_000),
@@ -247,28 +222,11 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     ext
 }
 
-/// 10^18 sub-units per whole unit, VTRS and tokens alike.
-pub const UNIT: u128 = 1_000_000_000_000_000_000;
-/// The runtime's existential deposit (100 µVTRS).
-pub const RUNTIME_ED: u128 = 100_000_000_000_000;
-/// The runtime's `AssetDeposit` and `AssetAccountDeposit`.
-pub const RUNTIME_ASSET_DEPOSIT: u128 = 100;
-pub const RUNTIME_ASSET_ACCOUNT_DEPOSIT: u128 = 10;
-/// The runtime's default solver bond.
-pub const RUNTIME_SOLVER_BOND: u128 = 1_000 * UNIT;
-/// A sufficient asset; on the runtime no asset is, so only tests about the
-/// sufficient case use it.
-pub const SUFFICIENT_ID: u32 = 3;
-/// Neither a user nor a solver in the runtime-like tests.
-pub const DAVE: AccountId = acc(4);
-/// Native and token balance of each actor in the runtime-like tests.
-pub const RUNTIME_LIKE_BALANCE: u128 = 1_000_000 * UNIT;
-
 /// Externalities shaped like the runtime the DEX runs on: its ED and asset
-/// deposits, every asset non-sufficient except `SUFFICIENT_ID`, the bond at
-/// its default, and the treasury holding exactly its ED. The DEX's genesis
-/// build does not run, as on a chain that receives the pallet by upgrade;
-/// `new_runtime_like_ext_from_genesis` runs it.
+/// deposits, every asset non-sufficient except `SUFFICIENT_ID`, and the
+/// treasury holding exactly its ED (see [`crate::testing`]). The DEX's
+/// genesis build does not run, as on a chain that receives the pallet by
+/// upgrade; `new_runtime_like_ext_from_genesis` runs it.
 pub(crate) fn new_runtime_like_ext() -> sp_io::TestExternalities {
     build_runtime_like_ext(false)
 }
@@ -281,33 +239,8 @@ fn build_runtime_like_ext(dex_genesis: bool) -> sp_io::TestExternalities {
     ExistentialDeposit::set(RUNTIME_ED);
     AssetDeposit::set(RUNTIME_ASSET_DEPOSIT);
     AssetAccountDeposit::set(RUNTIME_ASSET_ACCOUNT_DEPOSIT);
-    DefaultSolverBondAmount::set(RUNTIME_SOLVER_BOND);
 
-    let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
-    let actors = [ALICE, BOB, CHARLIE, DAVE];
-    pallet_balances::GenesisConfig::<Test> {
-        balances: actors
-            .iter()
-            .map(|a| (*a, RUNTIME_LIKE_BALANCE))
-            .chain(core::iter::once((TREASURY, RUNTIME_ED)))
-            .collect(),
-    }
-    .assimilate_storage(&mut t)
-    .unwrap();
-    pallet_assets::GenesisConfig::<Test> {
-        assets: vec![
-            (USDC_ID, ALICE, false, 1),
-            (VNRG_ID, ALICE, false, 1),
-            (SUFFICIENT_ID, ALICE, true, 1),
-        ],
-        accounts: [USDC_ID, VNRG_ID, SUFFICIENT_ID]
-            .iter()
-            .flat_map(|id| actors.iter().map(move |a| (*id, *a, RUNTIME_LIKE_BALANCE)))
-            .collect(),
-        ..Default::default()
-    }
-    .assimilate_storage(&mut t)
-    .unwrap();
+    let mut t = runtime_like_storage::<Test>();
     if dex_genesis {
         pallet_vitreus_dex::GenesisConfig::<Test>::default()
             .assimilate_storage(&mut t)

@@ -189,9 +189,6 @@ impl pallet_vitreus_dex::Config for Test {
     type DefaultProtocolFeeRecipient = TreasuryAccount;
     type CreatorFeeRecipient = LaunchpadCreators;
     type TreasurySink = ();
-    type DefaultBidWindowBlocks = ConstU64<10>;
-    type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = ConstU128<1_000_000_000_000>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();

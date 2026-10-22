@@ -2644,3 +2644,30 @@ fn d9_migration_v3_widens_routing_on_every_pool_and_the_default() {
         assert_eq!(Pools::<Test>::get(pair).unwrap().routing.treasury_bps, 0);
     });
 }
+
+#[test]
+fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
+    use crate::migrations::v5::{any_left, MigrateToV5, ITEMS};
+    use frame_support::{
+        storage::{storage_prefix, unhashed},
+        traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion},
+    };
+
+    new_test_ext().execute_with(|| {
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        // A value under each item, and two under each map-like one.
+        for item in ITEMS {
+            let p = storage_prefix(b"VitreusDex", item.as_bytes());
+            unhashed::put_raw(&p, &[1]);
+            unhashed::put_raw(&[&p[..], &[7u8; 16]].concat(), &[2]);
+        }
+        StorageVersion::new(4).put::<VitreusDex>();
+        assert!(any_left::<Test>());
+
+        MigrateToV5::<Test>::on_runtime_upgrade();
+
+        assert!(!any_left::<Test>());
+        assert!(Pools::<Test>::contains_key(VitreusDex::canonical_pair(native(), usdc())));
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(5));
+    });
+}
