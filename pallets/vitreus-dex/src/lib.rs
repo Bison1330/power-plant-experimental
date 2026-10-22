@@ -37,6 +37,8 @@
 #![allow(clippy::result_unit_err, clippy::too_many_arguments)]
 
 #[cfg(test)]
+mod account_lifecycle_tests;
+#[cfg(test)]
 mod mock;
 #[cfg(test)]
 mod settlement_integration_tests;
