@@ -23,6 +23,7 @@ sp-runtime = { workspace = true, default-features = false }
 sp-arithmetic = { workspace = true, default-features = false }
 
 [dev-dependencies]
+proptest = "=1.5.0"
 pallet-balances = { workspace = true, features = ["std"] }
 pallet-assets = { workspace = true, features = ["std"] }
 primitive-types = { workspace = true, default-features = false, features = ["codec", "scale-info", "num-traits"] }

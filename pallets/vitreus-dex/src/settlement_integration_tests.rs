@@ -22,7 +22,7 @@ fn vnrg() -> NativeOrAssetId {
 }
 
 /// Register `who` as a solver and return the assigned id.
-fn register_solver_for(who: u128) -> u64 {
+fn register_solver_for(who: AccountId) -> u64 {
     let id = NextSolverId::<Test>::get();
     assert_ok!(VitreusDex::register_solver(RuntimeOrigin::signed(who)));
     id
