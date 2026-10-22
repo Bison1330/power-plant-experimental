@@ -429,11 +429,13 @@ fn fm02_prefunded_pool_account_does_not_move_opening_price() {
         let pool = Pools::<Test>::get(pair(id)).unwrap();
         let raised = pool.reserve_a;
         assert_eq!(pool.reserve_b, RESERVED);
-        // Live balances equal the stored amounts: nothing extra in the pool.
-        assert_eq!(vtrs(&pa), raised);
+        // Live balances equal the stored amounts: nothing extra in the pool
+        // beyond the pool account's own ED, which is not a reserve.
+        assert_eq!(vtrs(&pa), raised + ED);
         assert_eq!(tok(id, &pa), RESERVED);
-        // Donations went to the DEX excess recipient.
-        assert_eq!(vtrs(EXCESS) - excess_before.0, 5 * UNIT);
+        // Donations went to the DEX excess recipient, all but the first ED
+        // of native, which the pool account kept as its own.
+        assert_eq!(vtrs(EXCESS) - excess_before.0, 5 * UNIT - ED);
         assert_eq!(tok(id, EXCESS) - excess_before.1, donated_tokens);
         // First swap prices off the stored reserves (sync_reserves finds nothing extra).
         let amount_in = 10 * UNIT;
@@ -857,7 +859,8 @@ fn fm08_crossing_buy_partial_fill_and_deferred_seed() {
         assert_eq!(state(id).phase, Phase::Graduated);
         let pool = Pools::<Test>::get(pair(id)).unwrap();
         assert_eq!((pool.reserve_a, pool.reserve_b), (raised, RESERVED));
-        assert_eq!(vtrs(pool_account(id)), raised);
+        // (above the pool account's own ED, which is not a reserve)
+        assert_eq!(vtrs(pool_account(id)), raised + ED);
         assert_eq!(tok(id, pool_account(id)), RESERVED);
     });
 }
@@ -1217,6 +1220,8 @@ fn fm11_every_complete_state_has_a_forward_path() {
             },
         );
         TotalLiquidity::<Test>::insert(pair(id), 0u128);
+        // The ED pool creation gives every pool account.
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), pool_account(id), ED));
         // liquidity at roughly p_end so the rescue is within tolerance
         let (pn, pd) = p_end(id);
         let tokens = tok(id, BOB);

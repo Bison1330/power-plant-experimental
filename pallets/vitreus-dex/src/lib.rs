@@ -220,6 +220,14 @@ impl<AssetKind, AccountId, Balance> TreasurySink<AssetKind, AccountId, Balance> 
 /// transfer. A quote computed from the stored fields overstates the output
 /// and the chain then fails the swap with `SlippageExceeded` at a tight
 /// `amount_out_min`. The frontend's swap page reads balances for this reason.
+///
+/// **The pool account's first ED of native is not a reserve.** Every pool
+/// account holds the native existential deposit from creation, as its own
+/// provider: it lets a pool with no native side hold non-sufficient tokens,
+/// and no withdrawal or swap can take the account below the ED, so it can
+/// neither be frozen by a token it holds nor dust its remaining LPs. A
+/// native reserve is the account's native balance less the ED
+/// ([`PoolManager::native_reserves`] already subtracts it).
 #[derive(
     Clone,
     Encode,
@@ -407,12 +415,13 @@ pub mod pallet {
 
     /// v2 on the fork is D8 (hash-derived pool accounts, `migrations::v2`).
     /// v5 removes the solver marketplace's storage, which moved to a pallet
-    /// of its own (`migrations::v5`).
+    /// of its own (`migrations::v5`); v6 gives the fee escrow and every pool
+    /// account their ED (`migrations::v6`).
     /// D9 — `FeeRouting.treasury_bps`, `LastSwapBlock` — changes the shape
     /// of every stored `PoolInfo`, so on the fork it is v3 with a migration
     /// (`migrations::v3`); the submission branch, which no chain with v1
     /// pools targets, carries D9 as its v2 without one.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(5);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(6);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -770,7 +779,7 @@ pub mod pallet {
     /// Finding 14, from-genesis path: endow the fee escrow with the native ED so
     /// it exists before the first swap and every routed protocol/creator slice —
     /// even one below ED — reaches it rather than being left in the pool. On a
-    /// chain that receives this pallet by upgrade the fork migration does the
+    /// chain that receives this pallet by upgrade, `migrations::v6` does the
     /// same; the `do_swap` guard makes correctness independent of either.
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
@@ -783,12 +792,7 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            let native = T::NativeAsset::get();
-            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
-            let escrow = Pallet::<T>::fee_escrow_account();
-            if !frame_system::Pallet::<T>::account_exists(&escrow) {
-                let _ = T::Assets::mint_into(native, &escrow, ed);
-            }
+            Pallet::<T>::endow_with_ed(&Pallet::<T>::fee_escrow_account());
         }
     }
 
@@ -1061,10 +1065,11 @@ pub mod pallet {
         /// must agree with one another. Each check is a balance the pallet
         /// promised someone or a count two maps must share:
         ///
-        /// - the fee escrow holds at least every unclaimed protocol and
-        ///   creator fee;
-        /// - a pool account holds at least its recorded reserves, and the
-        ///   pool's shares are its positions plus the locked minimum.
+        /// - the fee escrow holds its ED and, above it, every unclaimed
+        ///   protocol and creator fee;
+        /// - a pool account holds its ED of native and, above it, at least
+        ///   its recorded reserves, and the pool's shares are its positions
+        ///   plus the locked minimum.
         #[cfg(any(feature = "try-runtime", feature = "test-utils", test))]
         pub fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
             use frame_support::ensure;
@@ -1072,15 +1077,22 @@ pub mod pallet {
             let native = T::NativeAsset::get();
             let fees = CreatorFeesUnclaimed::<T>::iter_values()
                 .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
+            let ed = Self::native_ed();
             ensure!(
-                T::Assets::balance(native.clone(), &Self::fee_escrow_account()) >= fees,
-                "the fee escrow holds less than the fees it owes"
+                T::Assets::balance(native.clone(), &Self::fee_escrow_account())
+                    >= fees.saturating_add(ed),
+                "the fee escrow holds less than its ED and the fees it owes"
             );
 
             for (pair, pool) in Pools::<T>::iter() {
                 ensure!(
-                    T::Assets::balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
-                        && T::Assets::balance(pair.1.clone(), &pool.pool_account) >= pool.reserve_b,
+                    T::Assets::balance(native.clone(), &pool.pool_account) >= ed,
+                    "a pool account holds less than its ED"
+                );
+                ensure!(
+                    Self::reserve_balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
+                        && Self::reserve_balance(pair.1.clone(), &pool.pool_account)
+                            >= pool.reserve_b,
                     "a pool account holds less than its reserves"
                 );
                 let total = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
@@ -1192,8 +1204,53 @@ pub mod pallet {
             pair: &(T::AssetKind, T::AssetKind),
             pool: &mut PoolInfo<T::Balance, T::AccountId>,
         ) {
-            pool.reserve_a = T::Assets::balance(pair.0.clone(), &pool.pool_account);
-            pool.reserve_b = T::Assets::balance(pair.1.clone(), &pool.pool_account);
+            pool.reserve_a = Self::reserve_balance(pair.0.clone(), &pool.pool_account);
+            pool.reserve_b = Self::reserve_balance(pair.1.clone(), &pool.pool_account);
+        }
+
+        /// What `pool_account` holds of `asset` as a reserve: its balance,
+        /// less the ED it keeps when `asset` is native (see [`PoolInfo`]).
+        pub(crate) fn reserve_balance(
+            asset: T::AssetKind,
+            pool_account: &T::AccountId,
+        ) -> T::Balance {
+            let held = T::Assets::balance(asset.clone(), pool_account);
+            if asset.encode() == T::NativeAsset::get().encode() {
+                held.saturating_sub(Self::native_ed())
+            } else {
+                held
+            }
+        }
+
+        /// The native existential deposit.
+        pub(crate) fn native_ed() -> T::Balance {
+            <T::Assets as Inspect<T::AccountId>>::minimum_balance(T::NativeAsset::get())
+        }
+
+        /// Whether `amount` of native can be paid into `who`. pallet-balances
+        /// refuses a credit that would leave the account's free balance below
+        /// the ED, and it does not matter whether the account exists: one
+        /// kept alive by a sufficient asset has no native and still cannot
+        /// take less than an ED.
+        pub(crate) fn can_receive_native(who: &T::AccountId, amount: T::Balance) -> bool {
+            T::Assets::balance(T::NativeAsset::get(), who).saturating_add(amount)
+                >= Self::native_ed()
+        }
+
+        /// Mint the native ED into `who` if it holds no native, so it exists
+        /// by its own provider. Returns whether it minted.
+        pub(crate) fn endow_with_ed(who: &T::AccountId) -> bool {
+            let native = T::NativeAsset::get();
+            if !T::Assets::balance(native.clone(), who).is_zero() {
+                return false;
+            }
+            match T::Assets::mint_into(native, who, Self::native_ed()) {
+                Ok(_) => true,
+                Err(e) => {
+                    log::error!(target: "runtime::vitreus-dex", "could not endow {who:?}: {e:?}");
+                    false
+                },
+            }
         }
 
         // ---- Wide-precision arithmetic helpers (D1) --------------------------
@@ -1316,6 +1373,10 @@ pub mod pallet {
                 routing,
             };
 
+            // The pool account's own ED (see `PoolInfo`). Pool creation is
+            // `ManageOrigin`'s or a launch graduating, so this mints at most
+            // one ED per pool governance or a launch made.
+            Self::endow_with_ed(&pool.pool_account);
             Pools::<T>::insert(pair, pool);
             TotalLiquidity::<T>::insert(pair, T::Balance::zero());
 
@@ -1386,12 +1447,14 @@ pub mod pallet {
                 [pair.1.clone(), pair.0.clone()]
             };
             for swept in sweep_order {
-                let held = T::Assets::reducible_balance(
-                    swept.clone(),
-                    &pool.pool_account,
-                    Expendable,
-                    Polite,
-                );
+                // Everything but the pool account's own ED (see `PoolInfo`).
+                let keep = if swept.encode() == T::NativeAsset::get().encode() {
+                    Preserve
+                } else {
+                    Expendable
+                };
+                let held =
+                    T::Assets::reducible_balance(swept.clone(), &pool.pool_account, keep, Polite);
                 if held.is_zero() {
                     continue;
                 }
@@ -1404,13 +1467,7 @@ pub mod pallet {
                 // own storage layer so the underlying error leaves nothing
                 // half-applied before the outer transactional rollback.
                 frame_support::storage::with_storage_layer(|| {
-                    T::Assets::transfer(
-                        swept.clone(),
-                        &pool.pool_account,
-                        &excess_to,
-                        held,
-                        Expendable,
-                    )
+                    T::Assets::transfer(swept.clone(), &pool.pool_account, &excess_to, held, keep)
                 })
                 .map_err(|_| Error::<T>::ExcessRecipientCannotReceive)?;
                 Self::deposit_event(Event::PreSeedBalanceSwept {
@@ -1420,6 +1477,9 @@ pub mod pallet {
                     to: excess_to.clone(),
                 });
             }
+
+            // An adopted record from before pools were endowed has no ED yet.
+            Self::endow_with_ed(&pool.pool_account);
 
             // 3. First deposit, with the amounts mapped onto the canonical
             //    slots. Quote is transferred FIRST regardless of canonical
@@ -1799,23 +1859,23 @@ pub mod pallet {
             // fee escrow before its first fee, or the treasury vault before it is
             // funded — and pallet-balances fails the transfer, which used to fail
             // the whole swap with an unreadable `Token(BelowMinimum)`. When a
-            // slice is below ED *and* its recipient has no account, leave that
+            // slice would leave its recipient's native below the ED, leave that
             // slice in the pool: it accrues to LPs at the next `sync_reserves`,
             // exactly as the pool's own fee share does (D7). The consequence,
             // stated plainly so no later reader treats a routing total as exact:
             // `ProtocolFeesUnclaimed`, `CreatorFeesUnclaimed` and the sink's
             // tally do NOT count a sub-ED slice that was redirected to LPs this
-            // way. The window is only "before the recipient's first ≥ED credit";
-            // once it exists every later slice of any size routes in full, and a
-            // GenesisConfig / migration funds the fee escrow so it never opens on
-            // a real chain.
-            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
+            // way. The window is only "before the recipient holds an ED of
+            // native" — not "before its account exists": an account kept alive
+            // by a sufficient asset holds none. Once it does, every later slice
+            // of any size routes in full, and genesis or `migrations::v6` funds
+            // the fee escrow so the window never opens for it on a real chain.
             let fee_escrow = Self::fee_escrow_account();
             // D4: move the routed slices out of the pool account into the fee
             // escrow, so neither reserves nor `sync_reserves` ever see them.
             let escrowed = protocol.checked_add(&creator).ok_or(Error::<T>::Overflow)?;
-            let route_escrowed = !escrowed.is_zero()
-                && (escrowed >= ed || frame_system::Pallet::<T>::account_exists(&fee_escrow));
+            let route_escrowed =
+                !escrowed.is_zero() && Self::can_receive_native(&fee_escrow, escrowed);
             if route_escrowed {
                 T::Assets::transfer(
                     native.clone(),
@@ -1835,9 +1895,7 @@ pub mod pallet {
             // for why a push is safe here and was not for the other two), under
             // the same Finding-14 guard.
             if let Some(vault) = sink {
-                if !treasury.is_zero()
-                    && (treasury >= ed || frame_system::Pallet::<T>::account_exists(&vault))
-                {
+                if !treasury.is_zero() && Self::can_receive_native(&vault, treasury) {
                     T::Assets::transfer(
                         native.clone(),
                         &pool.pool_account,
@@ -1970,8 +2028,8 @@ impl<T: Config> PoolManager<T::AccountId, T::AssetKind, T::Balance, BlockNumberF
         let pair = Self::canonical_pair(native.clone(), asset.clone());
         let pool = Pools::<T>::get(&pair)?;
         Some((
-            T::Assets::balance(native, &pool.pool_account),
-            T::Assets::balance(asset, &pool.pool_account),
+            Self::reserve_balance(native, &pool.pool_account),
+            Self::reserve_balance(asset, &pool.pool_account),
         ))
     }
 
@@ -2571,6 +2629,116 @@ pub mod migrations {
             4,
             5,
             VersionUncheckedMigrateToV5<T>,
+            Pallet<T>,
+            <T as frame_system::Config>::DbWeight,
+        >;
+    }
+
+    /// v6: the fee escrow and every pool account hold the native ED.
+    pub mod v6 {
+        use super::*;
+
+        /// Unversioned body; wrap in [`MigrateToV6`].
+        ///
+        /// Genesis endows the fee escrow and pool creation endows each pool;
+        /// a chain that received the pallet by upgrade has had neither. The
+        /// ED is minted, as genesis does, rather than drawn from an account
+        /// that may not hold it.
+        ///
+        /// - The fee escrow is topped up to its ED plus every unclaimed fee,
+        ///   so withdrawing them all leaves it its ED.
+        /// - Every existing pool account gets an ED on top of what it holds:
+        ///   reserves are now read net of it, so a pool keeps exactly the
+        ///   reserves it had.
+        pub struct VersionUncheckedMigrateToV6<T>(PhantomData<T>);
+
+        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV6<T> {
+            fn on_runtime_upgrade() -> Weight {
+                let native = T::NativeAsset::get();
+                let ed = Pallet::<T>::native_ed();
+                let escrow = Pallet::<T>::fee_escrow_account();
+                let owed = CreatorFeesUnclaimed::<T>::iter_values()
+                    .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
+                let held = T::Assets::balance(native.clone(), &escrow);
+                let short = owed.saturating_add(ed).saturating_sub(held);
+                let mut reads =
+                    2u64.saturating_add(CreatorFeesUnclaimed::<T>::iter_keys().count() as u64);
+                let mut writes = 0u64;
+                if !short.is_zero() {
+                    // An escrow holding nothing is short by at least an ED;
+                    // a live one may be topped up by less.
+                    match T::Assets::mint_into(native.clone(), &escrow, short) {
+                        Ok(_) => writes = writes.saturating_add(2),
+                        Err(e) => log::error!(
+                            target: "runtime::vitreus-dex",
+                            "v6 migration: could not top up the fee escrow by {short:?}: {e:?}"
+                        ),
+                    }
+                }
+                let mut pools = 0u32;
+                for (_pair, pool) in Pools::<T>::iter() {
+                    reads = reads.saturating_add(1);
+                    match T::Assets::mint_into(native.clone(), &pool.pool_account, ed) {
+                        Ok(_) => {
+                            pools = pools.saturating_add(1);
+                            writes = writes.saturating_add(2);
+                        },
+                        Err(e) => log::error!(
+                            target: "runtime::vitreus-dex",
+                            "v6 migration: could not endow {:?}: {e:?}",
+                            pool.pool_account
+                        ),
+                    }
+                }
+                log::info!(
+                    target: "runtime::vitreus-dex",
+                    "v6 migration: fee escrow topped up by {short:?}; {pools} pool account(s) endowed"
+                );
+                T::DbWeight::get().reads_writes(reads, writes)
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+                let reserves: sp_std::vec::Vec<_> = Pools::<T>::iter()
+                    .map(|(pair, p)| {
+                        (
+                            pair.clone(),
+                            T::Assets::balance(pair.0.clone(), &p.pool_account),
+                            T::Assets::balance(pair.1, &p.pool_account),
+                        )
+                    })
+                    .collect();
+                Ok(reserves.encode())
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn post_upgrade(
+                state: sp_std::vec::Vec<u8>,
+            ) -> Result<(), sp_runtime::TryRuntimeError> {
+                let before: sp_std::vec::Vec<(
+                    (T::AssetKind, T::AssetKind),
+                    T::Balance,
+                    T::Balance,
+                )> = Decode::decode(&mut &state[..]).map_err(|_| "pre_upgrade state")?;
+                for (pair, a, b) in before {
+                    let pool = Pools::<T>::get(&pair).ok_or("a pool was lost")?;
+                    frame_support::ensure!(
+                        Pallet::<T>::reserve_balance(pair.0.clone(), &pool.pool_account) == a
+                            && Pallet::<T>::reserve_balance(pair.1.clone(), &pool.pool_account)
+                                == b,
+                        "a pool's reserves changed"
+                    );
+                }
+                Pallet::<T>::do_try_state()
+            }
+        }
+
+        /// Endowment of the fee escrow and the pool accounts, gated on the
+        /// pallet's on-chain storage version.
+        pub type MigrateToV6<T> = VersionedMigration<
+            5,
+            6,
+            VersionUncheckedMigrateToV6<T>,
             Pallet<T>,
             <T as frame_system::Config>::DbWeight,
         >;

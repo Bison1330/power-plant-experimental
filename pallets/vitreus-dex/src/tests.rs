@@ -909,7 +909,8 @@ fn seed_reserved_pool_creates_pool_deposits_stored_amounts_and_locks_forever() {
         // Exactly the stored amounts left the escrow and sit in the pool account.
         assert_eq!(native_before - Balances::free_balance(ESCROW), SEED_NATIVE);
         assert_eq!(token_before - Assets::balance(LAUNCH_ID, ESCROW), SEED_TOKEN);
-        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE);
+        // Above the pool account's own ED, which is not a reserve.
+        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
         assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
 
         let pool = Pools::<Test>::get(key.clone()).unwrap();
@@ -1019,10 +1020,15 @@ fn seed_sweeps_pre_seed_donations_so_opening_price_is_stored_ratio() {
 
         let shares = seed(ESCROW).expect("seed");
 
-        // Donations landed in Treasury, not in the pool.
-        assert_eq!(Balances::free_balance(TREASURY), UNIT + donated_native);
+        // Donations landed in Treasury, not in the pool — all but the first
+        // ED of native, which the pool account keeps as its own.
+        assert_eq!(
+            Balances::free_balance(TREASURY),
+            UNIT + donated_native - ExistentialDeposit::get()
+        );
         assert_eq!(Assets::balance(LAUNCH_ID, TREASURY), donated_token);
-        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE);
+        // Above the pool account's own ED, which is not a reserve.
+        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
         assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
         System::assert_has_event(
             Event::PreSeedBalanceSwept {
@@ -1037,7 +1043,7 @@ fn seed_sweeps_pre_seed_donations_so_opening_price_is_stored_ratio() {
             Event::PreSeedBalanceSwept {
                 pool: key.clone(),
                 asset: native(),
-                amount: donated_native,
+                amount: donated_native - ExistentialDeposit::get(),
                 to: TREASURY,
             }
             .into(),
@@ -1240,9 +1246,13 @@ fn seed_burns_pre_seed_donation_when_recipient_cannot_receive_it() {
         assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), TREASURY, UNIT));
         assert_ok!(seed(ESCROW));
         assert_eq!(Assets::balance(LAUNCH_ID, TREASURY), donated_token);
-        assert_eq!(Balances::free_balance(TREASURY), UNIT + donated_native);
+        assert_eq!(
+            Balances::free_balance(TREASURY),
+            UNIT + donated_native - ExistentialDeposit::get()
+        );
         assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
-        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE);
+        // Above the pool account's own ED, which is not a reserve.
+        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
     });
 }
 
@@ -1623,7 +1633,7 @@ fn d4_swap_native_in_routes_slices_out_of_the_fee() {
         assert_eq!(pool.total_fees_collected, fee);
         assert_eq!(
             Balances::free_balance(pool_account),
-            pool.reserve_a + (fee - protocol - creator)
+            ExistentialDeposit::get() + pool.reserve_a + (fee - protocol - creator)
         );
 
         let k_before = sp_core::U256::from(SEED_NATIVE) * sp_core::U256::from(SEED_TOKEN);
@@ -1679,7 +1689,10 @@ fn d4_swap_native_out_routes_slices_from_the_gross_output() {
         assert_eq!(pool.reserve_a, SEED_NATIVE - gross);
         assert_eq!(pool.reserve_b, SEED_TOKEN + after_fee);
         assert_eq!(pool.total_fees_collected, fee);
-        assert_eq!(Balances::free_balance(pool_account), pool.reserve_a);
+        assert_eq!(
+            Balances::free_balance(pool_account),
+            ExistentialDeposit::get() + pool.reserve_a
+        );
         assert_eq!(Assets::balance(LAUNCH_ID, pool_account), pool.reserve_b + fee);
 
         let k_before = sp_core::U256::from(SEED_NATIVE) * sp_core::U256::from(SEED_TOKEN);
@@ -2073,7 +2086,8 @@ fn d8_second_pool_on_a_shared_account_would_read_the_first_pools_reserves() {
         );
         // The USDC pool still holds every unit Alice deposited, and its
         // record is untouched.
-        assert_eq!(Balances::free_balance(usdc_pool.pool_account), 1_000_000);
+        // (and its own ED)
+        assert_eq!(Balances::free_balance(usdc_pool.pool_account), 1_000_000 + ExistentialDeposit::get());
         let usdc_pool_after = Pools::<Test>::get(VitreusDex::canonical_pair(native(), usdc())).unwrap();
         assert_eq!((usdc_pool_after.reserve_a, usdc_pool_after.reserve_b), (1_000_000, 10_000));
 
@@ -2121,7 +2135,8 @@ fn d8_migration_v2_moves_reserves_to_the_hash_derived_account() {
 
         let pool = Pools::<Test>::get(pair.clone()).unwrap();
         assert_eq!(pool.pool_account, new);
-        assert_eq!(Balances::free_balance(new), 1_000_000);
+        // Plus the ED pool creation gave the new account.
+        assert_eq!(Balances::free_balance(new), 1_000_000 + ExistentialDeposit::get());
         assert_eq!(Assets::balance(USDC_ID, new), 10_000);
         assert_eq!(Balances::free_balance(old), 0);
         assert_eq!(Assets::balance(USDC_ID, old), 0);
@@ -2280,7 +2295,7 @@ fn d9_treasury_push_goes_to_vault_and_notes() {
         assert_eq!(pool.reserve_a, SEED_NATIVE + after_fee);
         assert_eq!(
             Balances::free_balance(pool_account),
-            pool.reserve_a + (fee - protocol - creator - treasury)
+            ExistentialDeposit::get() + pool.reserve_a + (fee - protocol - creator - treasury)
         );
 
         // Native out: the slices come off the gross output and the trader
@@ -2669,5 +2684,45 @@ fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
         assert!(!any_left::<Test>());
         assert!(Pools::<Test>::contains_key(VitreusDex::canonical_pair(native(), usdc())));
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(5));
+    });
+}
+
+#[test]
+fn migration_v6_endows_fee_escrow_and_every_pool_and_keeps_reserves() {
+    use crate::migrations::v6::MigrateToV6;
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+
+    new_test_ext().execute_with(|| {
+        let ed = ExistentialDeposit::get();
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        assert_ok!(VitreusDex::add_liquidity(
+            RuntimeOrigin::signed(ALICE),
+            native(),
+            usdc(),
+            100_000,
+            100_000,
+            0,
+            0
+        ));
+        let pair = VitreusDex::canonical_pair(native(), usdc());
+        let account = Pools::<Test>::get(&pair).unwrap().pool_account;
+        // A pool from before pools were endowed: its account holds exactly
+        // its reserves. And fees owed with the escrow holding just them.
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), account, 100_000));
+        crate::ProtocolFeesUnclaimed::<Test>::put(500);
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            VitreusDex::fee_escrow_account(),
+            500
+        ));
+        StorageVersion::new(5).put::<VitreusDex>();
+
+        MigrateToV6::<Test>::on_runtime_upgrade();
+
+        assert_eq!(Balances::free_balance(account), 100_000 + ed);
+        assert_eq!(VitreusDex::reserve_balance(native(), &account), 100_000);
+        assert_eq!(Balances::free_balance(VitreusDex::fee_escrow_account()), 500 + ed);
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
+        assert_ok!(VitreusDex::do_try_state());
     });
 }

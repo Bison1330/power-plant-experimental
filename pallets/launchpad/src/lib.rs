@@ -1124,11 +1124,18 @@ pub mod pallet {
             // (`account_for == None`) already does. So, as on the DEX side, a
             // treasury total (`treasury_fees_paid`) does NOT count a sub-ED slice
             // taken before the vault existed; the window closes at the vault's
-            // first ≥ED credit (LAUNCH_TREASURY_SPEC §9.6).
+            // first ≥ED credit (LAUNCH_TREASURY_SPEC §9.6). What decides is the
+            // vault's native balance, not whether its account exists: one kept
+            // alive by a sufficient asset holds no native and still cannot
+            // take less than an ED.
             let ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
             let treasury_bal: BalanceOf<T> = treasury.into();
             let sink = match sink {
-                Some(v) if treasury_bal >= ed || frame_system::Pallet::<T>::account_exists(&v) => {
+                Some(v)
+                    if <T::Currency as FungibleInspect<T::AccountId>>::balance(&v)
+                        .saturating_add(treasury_bal)
+                        >= ed =>
+                {
                     Some(v)
                 },
                 _ => None,
