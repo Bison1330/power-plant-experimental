@@ -5,6 +5,12 @@ use crate::{Error, Event, LiquidityPositions, PoolManager, Pools, TotalLiquidity
 use frame_support::{assert_noop, assert_ok};
 use sp_runtime::BuildStorage;
 
+/// What a pool account keeps of token `id` as its own: one less than its
+/// minimum balance (nothing, for every asset here).
+fn token_kept(id: u32) -> u128 {
+    <Assets as frame_support::traits::fungibles::Inspect<AccountId>>::minimum_balance(id) - 1
+}
+
 fn native() -> NativeOrAssetId {
     NativeOrAssetId::Native
 }
@@ -340,8 +346,9 @@ fn do_add_liquidity_for_direct_credits_who_and_returns_shares() {
         assert_eq!(minted, 19_000);
 
         // Tokens came out of `who`, not the caller/anyone else.
-        assert_eq!(Assets::balance(USDC_ID, BOB), bob_usdc_before - 10_000);
-        assert_eq!(Assets::balance(VNRG_ID, BOB), bob_vnrg_before - 40_000);
+        // (and what the pool account keeps of it, on this first deposit)
+        assert_eq!(Assets::balance(USDC_ID, BOB), bob_usdc_before - 10_000 - token_kept(USDC_ID));
+        assert_eq!(Assets::balance(VNRG_ID, BOB), bob_vnrg_before - 40_000 - token_kept(VNRG_ID));
         assert_eq!(Assets::balance(USDC_ID, ALICE), 1_000_000);
 
         let pos = LiquidityPositions::<Test>::get(BOB, pair()).expect("position");
@@ -471,7 +478,11 @@ fn pool_manager_trait_supports_full_graduation_flow() {
             .expect("seed liquidity");
         // sqrt(100_000 * 40_000) = 63_245; minus MINIMUM_LIQUIDITY.
         assert_eq!(minted, 63_245 - 1_000);
-        assert_eq!(Balances::free_balance(CHARLIE), native_before - 100_000);
+        // The first deposit also pays the pool account's own ED.
+        assert_eq!(
+            Balances::free_balance(CHARLIE),
+            native_before - 100_000 - ExistentialDeposit::get()
+        );
 
         assert_ok!(
             <Dex as PoolManager<AccountId, NativeOrAssetId, u128, u64>>::lock_liquidity_for(
@@ -906,12 +917,19 @@ fn seed_reserved_pool_creates_pool_deposits_stored_amounts_and_locks_forever() {
         assert_eq!(shares, expected_total - u128::from(crate::MINIMUM_LIQUIDITY));
         assert_eq!(TotalLiquidity::<Test>::get(key.clone()), Some(expected_total));
 
-        // Exactly the stored amounts left the escrow and sit in the pool account.
-        assert_eq!(native_before - Balances::free_balance(ESCROW), SEED_NATIVE);
-        assert_eq!(token_before - Assets::balance(LAUNCH_ID, ESCROW), SEED_TOKEN);
+        // Exactly the stored amounts left the escrow and sit in the pool
+        // account, with the pool account's own ED, which the seed pays.
+        assert_eq!(
+            native_before - Balances::free_balance(ESCROW),
+            SEED_NATIVE + ExistentialDeposit::get()
+        );
+        assert_eq!(
+            token_before - Assets::balance(LAUNCH_ID, ESCROW),
+            SEED_TOKEN + token_kept(LAUNCH_ID)
+        );
         // Above the pool account's own ED, which is not a reserve.
         assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
+        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN + token_kept(LAUNCH_ID));
 
         let pool = Pools::<Test>::get(key.clone()).unwrap();
         assert_eq!(pool.pool_account, pool_account);
@@ -1029,7 +1047,7 @@ fn seed_sweeps_pre_seed_donations_so_opening_price_is_stored_ratio() {
         assert_eq!(Assets::balance(LAUNCH_ID, TREASURY), donated_token);
         // Above the pool account's own ED, which is not a reserve.
         assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
+        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN + token_kept(LAUNCH_ID));
         System::assert_has_event(
             Event::PreSeedBalanceSwept {
                 pool: key.clone(),
@@ -1250,7 +1268,7 @@ fn seed_burns_pre_seed_donation_when_recipient_cannot_receive_it() {
             Balances::free_balance(TREASURY),
             UNIT + donated_native - ExistentialDeposit::get()
         );
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
+        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN + token_kept(LAUNCH_ID));
         // Above the pool account's own ED, which is not a reserve.
         assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE + ExistentialDeposit::get());
     });
@@ -1287,8 +1305,17 @@ fn d5_add_liquidity_non_canonical_order_maps_amounts_to_assets() {
             100_000,
             40_000,
         ));
-        assert_eq!(native_before - Balances::free_balance(ALICE), 40_000, "VTRS taken");
-        assert_eq!(usdc_before - Assets::balance(USDC_ID, ALICE), 100_000, "USDC taken");
+        // and the pool account's own ED, which its first deposit pays
+        assert_eq!(
+            native_before - Balances::free_balance(ALICE),
+            40_000 + ExistentialDeposit::get(),
+            "VTRS taken"
+        );
+        assert_eq!(
+            usdc_before - Assets::balance(USDC_ID, ALICE),
+            100_000 + token_kept(USDC_ID),
+            "USDC taken"
+        );
         let pool = Pools::<Test>::get(key.clone()).unwrap();
         assert_eq!(pool.reserve_a, 40_000, "reserve_a is the Native side");
         assert_eq!(pool.reserve_b, 100_000, "reserve_b is the USDC side");
@@ -1693,7 +1720,10 @@ fn d4_swap_native_out_routes_slices_from_the_gross_output() {
             Balances::free_balance(pool_account),
             ExistentialDeposit::get() + pool.reserve_a
         );
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), pool.reserve_b + fee);
+        assert_eq!(
+            Assets::balance(LAUNCH_ID, pool_account),
+            token_kept(LAUNCH_ID) + pool.reserve_b + fee
+        );
 
         let k_before = sp_core::U256::from(SEED_NATIVE) * sp_core::U256::from(SEED_TOKEN);
         let k_after = sp_core::U256::from(pool.reserve_a) * sp_core::U256::from(pool.reserve_b);
@@ -1918,7 +1948,7 @@ fn d6_add_liquidity_cannot_capture_unsynced_fees() {
         let pool = Pools::<Test>::get(pair()).unwrap();
         assert_eq!(pool.reserve_a, 10_990);
         assert_eq!(pool.reserve_b, 36_397);
-        assert_eq!(Assets::balance(USDC_ID, pool_account), 11_000);
+        assert_eq!(Assets::balance(USDC_ID, pool_account), 11_000 + token_kept(USDC_ID));
 
         // Bob deposits at the recorded ratio and immediately withdraws.
         let bob_usdc_before = Assets::balance(USDC_ID, BOB);
@@ -1933,8 +1963,11 @@ fn d6_add_liquidity_cannot_capture_unsynced_fees() {
             0,
         ));
         let recorded_after_add = Pools::<Test>::get(pair()).unwrap();
-        let held_after_add =
-            (Assets::balance(USDC_ID, pool_account), Assets::balance(VNRG_ID, pool_account));
+        // What the account holds as reserves (its own minimum of each aside).
+        let held_after_add = (
+            VitreusDex::reserve_balance(usdc(), &pool_account),
+            VitreusDex::reserve_balance(vnrg(), &pool_account),
+        );
 
         let bob_shares = LiquidityPositions::<Test>::get(BOB, pair()).unwrap().shares;
         assert_ok!(VitreusDex::remove_liquidity(
@@ -2137,7 +2170,7 @@ fn d8_migration_v2_moves_reserves_to_the_hash_derived_account() {
         assert_eq!(pool.pool_account, new);
         // Plus the ED pool creation gave the new account.
         assert_eq!(Balances::free_balance(new), 1_000_000 + ExistentialDeposit::get());
-        assert_eq!(Assets::balance(USDC_ID, new), 10_000);
+        assert_eq!(Assets::balance(USDC_ID, new), 10_000 + token_kept(USDC_ID));
         assert_eq!(Balances::free_balance(old), 0);
         assert_eq!(Assets::balance(USDC_ID, old), 0);
         assert_eq!((pool.reserve_a, pool.reserve_b), (1_000_000, 10_000));
@@ -2688,9 +2721,12 @@ fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
 }
 
 #[test]
-fn migration_v6_endows_fee_escrow_and_every_pool_and_keeps_reserves() {
+fn migration_v6_endows_fee_escrow_and_every_pool_from_source() {
     use crate::migrations::v6::MigrateToV6;
     use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+    frame_support::parameter_types! {
+        pub const Source: AccountId = CHARLIE;
+    }
 
     new_test_ext().execute_with(|| {
         let ed = ExistentialDeposit::get();
@@ -2704,8 +2740,13 @@ fn migration_v6_endows_fee_escrow_and_every_pool_and_keeps_reserves() {
             0,
             0
         ));
+        // A pool with no liquidity, which its first deposit will endow.
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), vnrg(), 3));
         let pair = VitreusDex::canonical_pair(native(), usdc());
         let account = Pools::<Test>::get(&pair).unwrap().pool_account;
+        let empty = Pools::<Test>::get(VitreusDex::canonical_pair(native(), vnrg()))
+            .unwrap()
+            .pool_account;
         // A pool from before pools were endowed: its account holds exactly
         // its reserves. And fees owed with the escrow holding just them.
         assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), account, 100_000));
@@ -2716,13 +2757,42 @@ fn migration_v6_endows_fee_escrow_and_every_pool_and_keeps_reserves() {
             500
         ));
         StorageVersion::new(5).put::<VitreusDex>();
+        let issuance = Balances::total_issuance();
+        let source = Balances::free_balance(CHARLIE);
 
-        MigrateToV6::<Test>::on_runtime_upgrade();
+        MigrateToV6::<Test, Source>::on_runtime_upgrade();
 
         assert_eq!(Balances::free_balance(account), 100_000 + ed);
         assert_eq!(VitreusDex::reserve_balance(native(), &account), 100_000);
         assert_eq!(Balances::free_balance(VitreusDex::fee_escrow_account()), 500 + ed);
+        assert_eq!(Balances::free_balance(empty), 0, "left to its first deposit");
+        assert_eq!(Balances::free_balance(CHARLIE), source - 2 * ed);
+        assert_eq!(Balances::total_issuance(), issuance, "nothing minted");
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
         assert_ok!(VitreusDex::do_try_state());
+    });
+}
+
+/// A seeder that cannot spare the pool account's ED on top of its quote —
+/// a launch created before launches set it aside — still seeds: the ED
+/// comes out of the quote, so a graduation never fails on it.
+#[test]
+fn seeder_that_cannot_spare_pools_ed_pays_it_out_of_quote() {
+    new_test_ext().execute_with(|| {
+        setup_reserved_asset();
+        let ed = 1_000;
+        ExistentialDeposit::set(ed);
+        // Exactly its own ED and the quote.
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), ESCROW, ed + SEED_NATIVE));
+        let key = VitreusDex::canonical_pair(native(), launch());
+        let pool_account = VitreusDex::pool_account_for(native(), launch());
+
+        assert_ok!(seed(ESCROW));
+
+        let pool = Pools::<Test>::get(key).unwrap();
+        assert_eq!(pool.reserve_a, SEED_NATIVE - ed);
+        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE);
+        assert_eq!(VitreusDex::reserve_balance(native(), &pool_account), pool.reserve_a);
+        assert_eq!(Balances::free_balance(ESCROW), ed);
     });
 }

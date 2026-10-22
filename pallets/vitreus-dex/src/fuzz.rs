@@ -52,10 +52,14 @@ const EVE: AccountId = acc(5);
 const ACTORS: [AccountId; 5] = [ALICE, BOB, CHARLIE, DAVE, EVE];
 /// A non-sufficient asset no actor holds at the start.
 const FRESH_ID: u32 = 200;
+/// A non-sufficient asset every actor holds whose minimum balance is 10^9,
+/// as one testnet asset's is, pooled thinly so trades reach it.
+const HIGH_MIN_ID: u32 = 201;
+const HIGH_MIN: u128 = 1_000_000_000;
 /// The pools, each against native: two non-sufficient assets every actor
 /// holds, the one sufficient asset, a seeded reserved asset with a creator,
-/// and a non-sufficient asset only ALICE holds.
-const POOL_ASSETS: [u32; 5] = [USDC_ID, VNRG_ID, SUFFICIENT_ID, LAUNCH_ID, FRESH_ID];
+/// a non-sufficient asset only ALICE holds, and the high-minimum asset.
+const POOL_ASSETS: [u32; 6] = [USDC_ID, VNRG_ID, SUFFICIENT_ID, LAUNCH_ID, FRESH_ID, HIGH_MIN_ID];
 
 // ---- programs ---------------------------------------------------------------
 
@@ -230,6 +234,10 @@ fn setup(mode: Mode) {
     for who in [BOB, CHARLIE, DAVE] {
         assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, who, 10_000 * UNIT));
     }
+    assert_ok!(Assets::force_create(root(), HIGH_MIN_ID, ALICE, false, HIGH_MIN));
+    for who in [ALICE, BOB, CHARLIE, DAVE] {
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), HIGH_MIN_ID, who, 1_000 * HIGH_MIN));
+    }
     // Plain pools route a protocol slice of every native trade.
     assert_ok!(VitreusDex::set_default_fee_routing(root(), 10, 5, 0, 0));
     for id in [USDC_ID, VNRG_ID, SUFFICIENT_ID, FRESH_ID] {
@@ -244,6 +252,16 @@ fn setup(mode: Mode) {
             0
         ));
     }
+    assert_ok!(VitreusDex::create_pool(root(), native(), kind(HIGH_MIN_ID), 10));
+    assert_ok!(VitreusDex::add_liquidity(
+        RuntimeOrigin::signed(ALICE),
+        native(),
+        kind(HIGH_MIN_ID),
+        10 * UNIT,
+        30 * HIGH_MIN,
+        0,
+        0
+    ));
     // The reserved asset is seeded, so its pool routes a creator slice too.
     assert_ok!(VitreusDex::set_default_fee_routing(root(), 3, 15, 5, 0));
     assert_ok!(<VitreusDex as ReservedPoolSeeder<
@@ -290,9 +308,20 @@ fn ordinary(op: &'static str, e: &DispatchError) -> bool {
         return true;
     }
     match op {
-        "swap" => own(&[SlippageExceeded, InsufficientLiquidity]),
+        "swap" => own(&[
+            SlippageExceeded,
+            InsufficientLiquidity,
+            ReserveBelowMinimum,
+            RecipientCannotReceive,
+        ]),
         "add_liquidity" => own(&[SlippageExceeded, InsufficientInitialLiquidity]),
-        "remove_liquidity" => own(&[InsufficientShares, PoolLocked, SlippageExceeded]),
+        "remove_liquidity" => own(&[
+            InsufficientShares,
+            PoolLocked,
+            SlippageExceeded,
+            ReserveBelowMinimum,
+            RecipientCannotReceive,
+        ]),
         _ => false,
     }
 }
@@ -505,18 +534,19 @@ impl World {
             if others == 0 {
                 continue;
             }
-            stuck(
-                "an LP's exit",
-                VitreusDex::remove_liquidity(
-                    RuntimeOrigin::signed(who),
-                    pair.0,
-                    pair.1,
-                    p.shares,
-                    0,
-                    0,
-                ),
-                self,
+            // An LP whose own account cannot take its payout (it sent its
+            // native away) is refused by name; that is its own business.
+            let exit = VitreusDex::remove_liquidity(
+                RuntimeOrigin::signed(who),
+                pair.0,
+                pair.1,
+                p.shares,
+                0,
+                0,
             );
+            if exit != Err(Error::<Test>::RecipientCannotReceive.into()) {
+                stuck("an LP's exit", exit, self);
+            }
         }
         self.check_invariants("drain");
     }

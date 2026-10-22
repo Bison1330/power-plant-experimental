@@ -33,6 +33,12 @@ pub const CREATOR: AccountId = acc(77);
 /// The launch asset's treasury vault, when a test installs one.
 pub const VAULT: AccountId = acc(88);
 
+frame_support::parameter_types! {
+    /// Who pays the endowments an upgrade's migrations make, as the
+    /// runtime's Treasury does there: DAVE, who holds plenty.
+    pub const UpgradeSource: AccountId = DAVE;
+}
+
 /// Asset ids.
 pub const USDC_ID: u32 = 1;
 #[allow(missing_docs)]
