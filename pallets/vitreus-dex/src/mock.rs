@@ -260,7 +260,7 @@ fn build_runtime_like_ext(dex_genesis: bool, upgraded: bool) -> sp_io::TestExter
         SINK_NOTED.with(|n| n.borrow_mut().clear());
         if upgraded {
             use frame_support::traits::UncheckedOnRuntimeUpgrade;
-            crate::migrations::v6::VersionUncheckedMigrateToV6::<Test>::on_runtime_upgrade();
+            crate::migrations::v6::VersionUncheckedMigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
             System::reset_events();
         }
     });

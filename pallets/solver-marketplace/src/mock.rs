@@ -249,7 +249,7 @@ fn build_runtime_like_ext(genesis: bool) -> sp_io::TestExternalities {
         System::set_block_number(1);
         if !genesis {
             use frame_support::traits::UncheckedOnRuntimeUpgrade;
-            pallet_vitreus_dex::migrations::v6::VersionUncheckedMigrateToV6::<Test>::on_runtime_upgrade();
+            pallet_vitreus_dex::migrations::v6::VersionUncheckedMigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
             System::reset_events();
         }
     });
