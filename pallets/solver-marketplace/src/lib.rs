@@ -38,6 +38,7 @@ mod tests;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
+pub mod migrations;
 pub mod settlement;
 pub mod weights;
 
@@ -74,7 +75,9 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    /// v1: the escrows hold an ED (`migrations::v1`); a chain built from
+    /// genesis starts there.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -374,6 +377,25 @@ pub mod pallet {
         #[cfg(feature = "try-runtime")]
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
             Self::do_try_state()
+        }
+    }
+
+    /// Endow the intent escrow and the fee treasury with the native ED, so
+    /// both exist before the first intent or fee whatever they receive. On a
+    /// chain that receives this pallet by upgrade, `migrations::v1` does
+    /// the same.
+    #[pallet::genesis_config]
+    #[derive(frame_support::DefaultNoBound)]
+    pub struct GenesisConfig<T: Config> {
+        /// No configurable fields; the build endows the escrows with the ED.
+        #[serde(skip)]
+        pub _marker: core::marker::PhantomData<T>,
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+        fn build(&self) {
+            Pallet::<T>::endow_escrows();
         }
     }
 
@@ -1029,6 +1051,28 @@ pub mod pallet {
                 );
             }
             Ok(())
+        }
+
+        /// Mint the native ED into each pallet-held escrow that holds no
+        /// native, so it exists by its own provider rather than by whatever
+        /// else it holds. Returns how many it endowed. Solver escrows are
+        /// not among them: each is created with its bond.
+        pub(crate) fn endow_escrows() -> u32 {
+            let native = T::NativeAsset::get();
+            let ed = T::Assets::minimum_balance(native.clone());
+            let mut endowed = 0;
+            for escrow in [Self::intent_escrow_account(), Self::protocol_treasury_account()] {
+                if T::Assets::balance(native.clone(), &escrow).is_zero() {
+                    match T::Assets::mint_into(native.clone(), &escrow, ed) {
+                        Ok(_) => endowed += 1,
+                        Err(e) => log::error!(
+                            target: "runtime::solver-marketplace",
+                            "could not endow {escrow:?} with the ED: {e:?}"
+                        ),
+                    }
+                }
+            }
+            endowed
         }
 
         /// The marketplace's own account. Nothing is held here; the escrows
