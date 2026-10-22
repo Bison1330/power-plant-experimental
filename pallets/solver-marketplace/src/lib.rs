@@ -395,7 +395,7 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            Pallet::<T>::endow_escrows();
+            Pallet::<T>::endow_escrows(None);
         }
     }
 
@@ -1053,23 +1053,32 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Mint the native ED into each pallet-held escrow that holds no
-        /// native, so it exists by its own provider rather than by whatever
-        /// else it holds. Returns how many it endowed. Solver escrows are
-        /// not among them: each is created with its bond.
-        pub(crate) fn endow_escrows() -> u32 {
+        /// Give each pallet-held escrow that holds less than the native ED
+        /// its ED, so it exists by its own provider rather than by whatever
+        /// else it holds: minted at genesis (`source` is `None`), and on a
+        /// live chain paid by `source`, so issuance does not change. Returns
+        /// how many it endowed. Solver escrows are not among them: each is
+        /// created with its bond.
+        pub(crate) fn endow_escrows(source: Option<&T::AccountId>) -> u32 {
             let native = T::NativeAsset::get();
             let ed = T::Assets::minimum_balance(native.clone());
             let mut endowed = 0;
             for escrow in [Self::intent_escrow_account(), Self::protocol_treasury_account()] {
-                if T::Assets::balance(native.clone(), &escrow).is_zero() {
-                    match T::Assets::mint_into(native.clone(), &escrow, ed) {
-                        Ok(_) => endowed += 1,
-                        Err(e) => log::error!(
-                            target: "runtime::solver-marketplace",
-                            "could not endow {escrow:?} with the ED: {e:?}"
-                        ),
-                    }
+                if T::Assets::balance(native.clone(), &escrow) >= ed {
+                    continue;
+                }
+                let paid = match source {
+                    None => T::Assets::mint_into(native.clone(), &escrow, ed).map(|_| ()),
+                    Some(from) => {
+                        T::Assets::transfer(native.clone(), from, &escrow, ed, Preserve).map(|_| ())
+                    },
+                };
+                match paid {
+                    Ok(()) => endowed += 1,
+                    Err(e) => log::error!(
+                        target: "runtime::solver-marketplace",
+                        "could not endow {escrow:?} with the ED: {e:?}"
+                    ),
                 }
             }
             endowed

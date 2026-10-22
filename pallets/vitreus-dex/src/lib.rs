@@ -2517,11 +2517,11 @@ pub mod migrations {
 
         /// Unversioned body; wrap in [`MigrateToV5`].
         ///
-        /// Nothing is carried over. A chain this reaches must have no
-        /// intents or solvers and none of governance's three settings set,
-        /// so the marketplace starts from its defaults; `pre_upgrade` refuses
-        /// any other chain, and on one that slipped past it the upgrade logs
-        /// every item it drops.
+        /// Nothing is carried over and nothing is refused: every item is
+        /// cleared, whatever it holds, and each one that held anything is
+        /// logged with how many keys it lost. A chain with open intents or
+        /// registered solvers loses them; one whose governance set the three
+        /// settings starts the marketplace from its defaults again.
         pub struct VersionUncheckedMigrateToV5<T>(PhantomData<T>);
 
         impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV5<T> {
@@ -2542,14 +2542,18 @@ pub mod migrations {
                 T::DbWeight::get().reads_writes(reads, writes)
             }
 
+            /// Reports what the upgrade will drop; never fails, so a chain
+            /// with open intents still passes try-runtime.
             #[cfg(feature = "try-runtime")]
             fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
                 for item in ITEMS {
                     let p = prefix::<T>(item);
-                    frame_support::ensure!(
-                        !sp_io::storage::next_key(&p).is_some_and(|k| k.starts_with(&p)),
-                        "the marketplace's storage is not empty; carry it to its pallet first"
-                    );
+                    if sp_io::storage::next_key(&p).is_some_and(|k| k.starts_with(&p)) {
+                        log::warn!(
+                            target: "runtime::vitreus-dex",
+                            "v5 pre_upgrade: {item} holds values; the upgrade drops them"
+                        );
+                    }
                 }
                 Ok(sp_std::vec::Vec::new())
             }
