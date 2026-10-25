@@ -113,6 +113,8 @@ parameter_types! {
 
 impl pallet_assets::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type Holder = ();
+    type ReserveData = ();
     type Balance = u128;
     type RemoveItemsLimit = ConstU32<1000>;
     type AssetId = u128;
@@ -179,7 +181,6 @@ impl pallet_vitreus_dex::CreatorFeeRecipient<NativeOrAssetId, Acc> for Launchpad
 }
 
 impl pallet_vitreus_dex::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type ManageOrigin = EnsureRoot<Acc>;
     type Balance = u128;
     type HigherPrecisionBalance = sp_core::U256;
@@ -252,7 +253,6 @@ impl OnCurveBuy<Acc, u128, u64> for PassHook {
 }
 
 impl pallet_launchpad::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type LaunchManageOrigin = EnsureRoot<Acc>;
     type AssetId = u128;
     type Currency = Balances;
@@ -604,7 +604,6 @@ parameter_types! {
 }
 
 impl pallet_launch_treasury::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type TreasuryManageOrigin = EnsureRoot<Acc>;
     type Staking = MockStaking;
     type Exchange = MockBroker;
@@ -686,7 +685,7 @@ fn build_ext(vault_funded: bool) -> sp_io::TestExternalities {
         // The broker holds the gas market's VTRS float (§3.2).
         (BROKER, 1_000_000 * UNIT),
     ];
-    pallet_balances::GenesisConfig::<Test> { balances }
+    pallet_balances::GenesisConfig::<Test> { dev_accounts: None, balances }
         .assimilate_storage(&mut t)
         .unwrap();
     pallet_assets::GenesisConfig::<Test> {

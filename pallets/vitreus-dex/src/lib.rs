@@ -68,7 +68,7 @@ use frame_support::{
     PalletId,
 };
 use frame_system::pallet_prelude::BlockNumberFor;
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_arithmetic::traits::Unsigned;
 use sp_runtime::{
@@ -131,7 +131,17 @@ pub fn pool_floor_bps(fee_tier: u32) -> u16 {
 /// that no pool of that tier could honour cannot be stored (that would
 /// fail every launchpad graduation at seed time, D4).
 #[derive(
-    Clone, Copy, Encode, Decode, Default, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen,
+    Clone,
+    Copy,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    Default,
+    Eq,
+    PartialEq,
+    RuntimeDebug,
+    TypeInfo,
+    MaxEncodedLen,
 )]
 pub struct FeeRouting {
     /// Share of every swap sent to the protocol fee recipient, in bps of the swap.
@@ -216,7 +226,17 @@ impl<AssetKind, AccountId, Balance> TreasurySink<AssetKind, AccountId, Balance> 
 /// transfer. A quote computed from the stored fields overstates the output
 /// and the chain then fails the swap with `SlippageExceeded` at a tight
 /// `amount_out_min`. The frontend's swap page reads balances for this reason.
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(
+    Clone,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    Eq,
+    PartialEq,
+    RuntimeDebug,
+    TypeInfo,
+    MaxEncodedLen,
+)]
 pub struct PoolInfo<Balance, AccountId> {
     /// Reserve of `asset_a` as of the last `sync_reserves`; see the struct docs
     /// before pricing from this.
@@ -236,7 +256,17 @@ pub struct PoolInfo<Balance, AccountId> {
 }
 
 /// On-chain record of a single liquidity provider's position in a pool.
-#[derive(Clone, Encode, Decode, Eq, PartialEq, RuntimeDebug, TypeInfo, MaxEncodedLen)]
+#[derive(
+    Clone,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    Eq,
+    PartialEq,
+    RuntimeDebug,
+    TypeInfo,
+    MaxEncodedLen,
+)]
 pub struct LiquidityPosition<Balance, BlockNumber> {
     /// LP shares owned by the provider.
     pub shares: Balance,
@@ -372,9 +402,6 @@ pub mod pallet {
 
     #[pallet::config]
     pub trait Config: frame_system::Config {
-        /// Overarching event type.
-        type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-
         /// The origin which can manage parameters of this pallet.
         type ManageOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 

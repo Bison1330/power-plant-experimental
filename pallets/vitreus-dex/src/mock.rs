@@ -50,6 +50,8 @@ impl pallet_balances::Config for Test {
 
 impl pallet_assets::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type Holder = ();
+    type ReserveData = ();
     type Balance = u128;
     type RemoveItemsLimit = ConstU32<1000>;
     type AssetId = u32;
@@ -162,7 +164,6 @@ impl frame_support::traits::Contains<NativeOrAssetId> for ReservedAssets {
 }
 
 impl Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type ManageOrigin = EnsureRoot<u128>;
     type Balance = u128;
     type HigherPrecisionBalance = sp_core::U256;
@@ -187,6 +188,7 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
 
     pallet_balances::GenesisConfig::<Test> {
+        dev_accounts: None,
         // 10× the default solver bond (1e12) so tests can run register +
         // deregister + re-register flows without hitting ED or balance limits.
         balances: vec![

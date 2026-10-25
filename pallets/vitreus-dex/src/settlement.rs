@@ -11,7 +11,7 @@
 //! runtime storage items in the main pallet and set via a governance
 //! extrinsic gated on `T::ManageOrigin`.
 
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 use sp_runtime::RuntimeDebug;
 
@@ -38,7 +38,18 @@ pub const SOLVER_PROFIT_FEE_BPS: u32 = 2_000;
 // ============================================================================
 
 /// Lifecycle status of an intent.
-#[derive(Clone, Copy, Encode, Decode, MaxEncodedLen, TypeInfo, RuntimeDebug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Copy,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    MaxEncodedLen,
+    TypeInfo,
+    RuntimeDebug,
+    PartialEq,
+    Eq,
+)]
 pub enum IntentStatus {
     /// Awaiting solver commitment.
     Open,
@@ -59,7 +70,17 @@ pub enum IntentStatus {
 /// A user-submitted trading intent. Generic over account, asset, balance, and
 /// block-number types so it can be instantiated against the concrete pallet
 /// types (`T::AccountId`, `T::AssetKind`, `T::Balance`, `BlockNumberFor<T>`).
-#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, RuntimeDebug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    MaxEncodedLen,
+    TypeInfo,
+    RuntimeDebug,
+    PartialEq,
+    Eq,
+)]
 pub struct Intent<AccountId, AssetKind, Balance, BlockNumber> {
     /// Pallet-scoped monotonically increasing id.
     pub id: u64,
@@ -86,7 +107,17 @@ pub struct Intent<AccountId, AssetKind, Balance, BlockNumber> {
 // ============================================================================
 
 /// Information about a registered solver.
-#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, RuntimeDebug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    MaxEncodedLen,
+    TypeInfo,
+    RuntimeDebug,
+    PartialEq,
+    Eq,
+)]
 pub struct SolverInfo<AccountId, Balance, BlockNumber> {
     /// Pallet-scoped monotonically increasing id.
     pub id: u64,
@@ -118,7 +149,17 @@ pub struct SolverInfo<AccountId, Balance, BlockNumber> {
 
 /// A solver's commitment to fill a specific intent. Exists only during the
 /// `Committed` status window.
-#[derive(Clone, Encode, Decode, MaxEncodedLen, TypeInfo, RuntimeDebug, PartialEq, Eq)]
+#[derive(
+    Clone,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    MaxEncodedLen,
+    TypeInfo,
+    RuntimeDebug,
+    PartialEq,
+    Eq,
+)]
 pub struct FillCommitment<AccountId, Balance, BlockNumber> {
     /// Id of the intent being filled.
     pub intent_id: u64,
