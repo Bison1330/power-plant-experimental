@@ -58,25 +58,38 @@ it pins, so both resolve the pallet to this crate.
 ## The patch reaches into the SDK in power-plant
 
 A `[patch]` replaces the crate everywhere in the graph, not only where we
-depend on it. Here nothing else depends on it. In power-plant on 2512 it
-does: `staging-xcm-builder` 2512 has a normal dependency on
-`pallet-asset-conversion`, and power-plant's runtime uses xcm-builder. After
-power-plant's 2512 bump, xcm-builder compiles against this 2609 crate instead
-of 2512's own 27.0.0.
+depend on it. Here nothing else depends on it. In power-plant on 2512 two
+crates do, and both compile against this 2609 crate instead of 2512's own
+27.0.0 after power-plant's 2512 bump:
+
+- `staging-xcm-builder` 2512, a normal dependency of power-plant's runtime.
+- `vitreus-runtime-common`, power-plant's own crate. `exchange.rs`
+  re-exports `pallet_asset_conversion::Swap` and bounds the energy exchange
+  on it.
 
 That is safe, for three reasons:
 
-- **The traits xcm-builder uses are unchanged.** Outside its tests,
+- **The traits both crates use are unchanged.** Outside its tests,
   xcm-builder uses `SwapCredit` and `QuotePrice`, in
-  `asset_exchange/single_asset_adapter/adapter.rs`; `SwapCredit` sits beside
-  `Swap`. All three are defined in `src/swap.rs`, which is byte-identical
-  between `polkadot-stable2512-8` and `polkadot-stable2609`.
+  `asset_exchange/single_asset_adapter/adapter.rs`; `vitreus-runtime-common`
+  uses `Swap`. All three are defined in `src/swap.rs`, which is
+  byte-identical between `polkadot-stable2512-8` and `polkadot-stable2609`.
 - **xcm-builder's only `Config` impl for the pallet is in its test mock**,
   behind `#[cfg(test)]`, and is not built as a dependency.
-- **power-plant configures no asset-conversion pallet in any runtime.** 2609's
+- **power-plant's runtime does not configure the pallet today.** 2609's
   breaking changes are all in `Config` (`LPFee` becomes `Get<Permill>`; new
   `AdminOrigin` and `MaxSwapFee`; per-pool fees) and reach only a runtime
   that configures the pallet.
+
+The runtime does keep two leftovers from an earlier asset-conversion
+pallet, since renamed: the `PoolAssets` instance (`pallet_assets::Instance1`,
+index 9) and the `py/ascon` `PalletId` with the `AssetConversionOrigin`
+account derived from it. Neither is an `impl pallet_asset_conversion::Config`.
+
+The DEX built on this pallet will configure it in power-plant's runtime, on
+purpose, against the 2609 `Config`. That runtime gets its own pallet-assets
+instance for LP tokens and its own `PalletId`, so it does not reuse
+`PoolAssets` or the `py/ascon` account.
 
 What was run to confirm it, on `polkadot-stable2512-8`:
 
