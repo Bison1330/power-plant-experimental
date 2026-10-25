@@ -1,0 +1,110 @@
+# Written by hand; the only file here that is not upstream's. src/ and
+# README.md are polkadot-sdk's substrate/frame/asset-conversion at the tag in
+# UPSTREAM plus ../pallet-asset-conversion.genesis.patch, and CI fails if
+# they differ (scripts/check-vendored.sh). Upstream's manifest inherits from
+# the polkadot-sdk workspace, so this one restates it against ours: the same
+# version, the same dependencies and features, and the SDK's lint table
+# copied below instead of inherited.
+[package]
+name = "pallet-asset-conversion"
+version = "32.0.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+edition.workspace = true
+license = "Apache-2.0"
+homepage = "https://paritytech.github.io/polkadot-sdk/"
+repository = "https://github.com/paritytech/polkadot-sdk.git"
+description = "FRAME asset conversion pallet"
+readme = "README.md"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { workspace = true }
+frame-benchmarking = { optional = true, workspace = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+log = { workspace = true }
+scale-info = { features = ["derive"], workspace = true }
+sp-api = { workspace = true }
+sp-arithmetic = { workspace = true }
+sp-core = { workspace = true }
+sp-io = { workspace = true }
+sp-runtime = { workspace = true }
+
+[dev-dependencies]
+pallet-assets = { workspace = true, default-features = true }
+pallet-balances = { workspace = true, default-features = true }
+primitive-types = { features = ["codec", "num-traits", "scale-info"], workspace = true }
+
+[features]
+default = ["std"]
+std = [
+	"codec/std",
+	"frame-benchmarking?/std",
+	"frame-support/std",
+	"frame-system/std",
+	"log/std",
+	"pallet-assets/std",
+	"pallet-balances/std",
+	"primitive-types/std",
+	"scale-info/std",
+	"sp-api/std",
+	"sp-arithmetic/std",
+	"sp-core/std",
+	"sp-io/std",
+	"sp-runtime/std",
+]
+runtime-benchmarks = [
+	"frame-benchmarking/runtime-benchmarks",
+	"frame-support/runtime-benchmarks",
+	"frame-system/runtime-benchmarks",
+	"pallet-assets/runtime-benchmarks",
+	"pallet-balances/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+]
+try-runtime = [
+	"frame-support/try-runtime",
+	"frame-system/try-runtime",
+	"pallet-assets/try-runtime",
+	"pallet-balances/try-runtime",
+	"sp-runtime/try-runtime",
+]
+
+# polkadot-sdk's [workspace.lints] at the same tag, which upstream inherits.
+[lints.rust]
+suspicious_double_ref_op = { level = "allow", priority = 2 }
+unexpected_cfgs = { level = "warn", check-cfg = [
+	'cfg(build_opt_level, values("3"))',
+	'cfg(build_profile, values("debug", "release"))',
+	'cfg(enable_alloc_error_handler)',
+	'cfg(fuzzing)',
+	'cfg(ignore_flaky_test)',
+	'cfg(substrate_runtime)',
+] }
+
+[lints.clippy]
+all = { level = "allow", priority = 0 }
+bind_instead_of_map = { level = "allow", priority = 2 }
+borrowed-box = { level = "allow", priority = 2 }
+complexity = { level = "warn", priority = 1 }
+correctness = { level = "warn", priority = 1 }
+default_constructed_unit_structs = { level = "allow", priority = 2 }
+derivable_impls = { level = "allow", priority = 2 }
+eq_op = { level = "allow", priority = 2 }
+erasing_op = { level = "allow", priority = 2 }
+extra-unused-type-parameters = { level = "allow", priority = 2 }
+identity-op = { level = "allow", priority = 2 }
+if-same-then-else = { level = "allow", priority = 2 }
+needless-lifetimes = { level = "allow", priority = 2 }
+needless_option_as_deref = { level = "allow", priority = 2 }
+nonminimal-bool = { level = "allow", priority = 2 }
+option-map-unit-fn = { level = "allow", priority = 2 }
+stable_sort_primitive = { level = "allow", priority = 2 }
+too-many-arguments = { level = "allow", priority = 2 }
+type_complexity = { level = "allow", priority = 2 }
+unit_arg = { level = "allow", priority = 2 }
+unnecessary_cast = { level = "allow", priority = 2 }
+useless_conversion = { level = "allow", priority = 2 }
+while_immutable_condition = { level = "allow", priority = 2 }
+zero-prefixed-literal = { level = "allow", priority = 2 }

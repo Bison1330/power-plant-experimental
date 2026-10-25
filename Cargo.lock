@@ -2194,6 +2194,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "pallet-asset-conversion"
+version = "32.0.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-assets",
+ "pallet-balances",
+ "parity-scale-codec",
+ "primitive-types 0.12.2",
+ "scale-info",
+ "sp-api",
+ "sp-arithmetic",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+]
+
+[[package]]
 name = "pallet-assets"
 version = "48.1.0"
 source = "git+https://github.com/paritytech/polkadot-sdk?tag=polkadot-stable2512-8#e1f0f7a3eabaf4bbfcdb6bf8de98de799bd192b8"

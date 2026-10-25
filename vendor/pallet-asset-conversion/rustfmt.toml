@@ -1,0 +1,4 @@
+# Upstream code, formatted to polkadot-sdk's own rules. The workspace's
+# `cargo fmt --all` would rewrite it and break the byte-for-byte check, so
+# it is left as it is.
+disable_all_formatting = true

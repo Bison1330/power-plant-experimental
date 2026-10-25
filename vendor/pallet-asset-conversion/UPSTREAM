@@ -1,0 +1,4 @@
+repository https://github.com/paritytech/polkadot-sdk
+tag polkadot-stable2609
+commit 7a8daa68e18718c18823c1109513fdc1c8aa71fe
+path substrate/frame/asset-conversion
