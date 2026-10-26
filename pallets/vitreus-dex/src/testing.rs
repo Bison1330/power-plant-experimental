@@ -71,6 +71,7 @@ where
     let mut t = frame_system::GenesisConfig::<T>::default().build_storage().unwrap();
     let actors = [ALICE, BOB, CHARLIE, DAVE];
     pallet_balances::GenesisConfig::<T> {
+        dev_accounts: None,
         balances: actors
             .iter()
             .map(|a| (*a, RUNTIME_LIKE_BALANCE))
