@@ -30,6 +30,8 @@
 #[cfg(test)]
 mod account_lifecycle_tests;
 #[cfg(test)]
+mod asset_conversion_tests;
+#[cfg(test)]
 mod fuzz;
 #[cfg(test)]
 mod mock;
@@ -76,6 +78,21 @@ use sp_runtime::{
 
 /// The PalletId used to derive the DEX sovereign account.
 pub const PALLET_ID: PalletId = PalletId(*b"vtrs/dex");
+
+/// The DEX's own account as the only member of a set: with
+/// [`EnsureDexAccount`], the base pallet's `AdminOrigin`. Only this pallet
+/// signs as that account, so no runtime origin reaches the base pallet's
+/// per-pool fee calls; a pool's fee is what this pallet set at creation.
+pub struct DexAccount<T>(core::marker::PhantomData<T>);
+impl<T: frame_system::Config> frame_support::traits::SortedMembers<T::AccountId> for DexAccount<T> {
+    fn sorted_members() -> sp_std::vec::Vec<T::AccountId> {
+        sp_std::vec![PALLET_ID.into_account_truncating()]
+    }
+}
+
+/// The base pallet's `AdminOrigin`: signed by the DEX's own account.
+pub type EnsureDexAccount<T> =
+    frame_system::EnsureSignedBy<DexAccount<T>, <T as frame_system::Config>::AccountId>;
 
 /// Denominator for the fee tier, expressed in 10ths of a percent.
 pub const FEE_DENOMINATOR: u32 = 1_000;

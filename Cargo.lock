@@ -2230,6 +2230,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-assets-freezer"
+version = "0.13.0"
+source = "git+https://github.com/paritytech/polkadot-sdk?tag=polkadot-stable2512-8#e1f0f7a3eabaf4bbfcdb6bf8de98de799bd192b8"
+dependencies = [
+ "log",
+ "pallet-assets",
+ "parity-scale-codec",
+ "polkadot-sdk-frame",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-balances"
 version = "46.0.0"
 source = "git+https://github.com/paritytech/polkadot-sdk?tag=polkadot-stable2512-8#e1f0f7a3eabaf4bbfcdb6bf8de98de799bd192b8"
@@ -2358,7 +2370,9 @@ dependencies = [
  "frame-system",
  "impl-trait-for-tuples",
  "log",
+ "pallet-asset-conversion",
  "pallet-assets",
+ "pallet-assets-freezer",
  "pallet-balances",
  "parity-scale-codec",
  "primitive-types 0.12.2",

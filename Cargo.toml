@@ -45,6 +45,7 @@ sp-io = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-st
 sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
 sp-std = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
 pallet-assets = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
+pallet-assets-freezer = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
 pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
 pallet-multisig = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
 pallet-proxy = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2512-8", default-features = false }
