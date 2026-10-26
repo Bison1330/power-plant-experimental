@@ -27,21 +27,19 @@
 #![warn(missing_docs)]
 #![allow(clippy::result_unit_err, clippy::too_many_arguments)]
 
-// Not yet ported to LP tokens: written against share accounting, which
-// the base pallet replaced.
-#[cfg(any())]
+#[cfg(test)]
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod asset_conversion_tests;
 #[cfg(test)]
 mod core_tests;
-#[cfg(any())]
+#[cfg(test)]
 mod fuzz;
 #[cfg(test)]
 mod mock;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
-#[cfg(any())]
+#[cfg(test)]
 mod tests;
 
 pub mod base;
@@ -1753,23 +1751,31 @@ pub mod pallet {
             let seed =
                 T::Base::lp_frozen(&asset_a, &asset_b, who, &FreezeReason::LaunchSeed.into());
             ensure!(lp <= held.saturating_sub(seed), Error::<T>::PoolLocked);
-            // What leaves must land: a payout the LP's own account cannot
-            // take (less than an ED of native on an account holding none,
-            // say) is refused as such, not as whatever the asset's pallet
-            // says halfway through.
+            // What the base pallet will pay, worked out here so its refusals
+            // are ours: each amount floored (in the pool's favour), at
+            // least the caller's minimum, more than nothing, and leaving each
+            // reserve at least its asset's minimum balance, which belongs to
+            // the remaining LPs.
             let (reserve_a, reserve_b) =
                 T::Base::reserves(&asset_a, &asset_b).ok_or(Error::<T>::InsufficientLiquidity)?;
             let issuance = T::Base::lp_issuance(&asset_a, &asset_b);
+            let pay_a = Self::mul_div_floor(lp, reserve_a, issuance)?;
+            let pay_b = Self::mul_div_floor(lp, reserve_b, issuance)?;
+            ensure!(pay_a >= amount_a_min && pay_b >= amount_b_min, Error::<T>::SlippageExceeded);
+            ensure!(!pay_a.is_zero() && !pay_b.is_zero(), Error::<T>::ZeroAmount);
             ensure!(
-                Self::can_credit(
-                    asset_a.clone(),
-                    who,
-                    Self::mul_div_floor(lp, reserve_a, issuance)?
-                ) && Self::can_credit(
-                    asset_b.clone(),
-                    who,
-                    Self::mul_div_floor(lp, reserve_b, issuance)?
-                ),
+                reserve_a.saturating_sub(pay_a) >= T::Assets::minimum_balance(asset_a.clone())
+                    && reserve_b.saturating_sub(pay_b)
+                        >= T::Assets::minimum_balance(asset_b.clone()),
+                Error::<T>::ReserveBelowMinimum
+            );
+            // And what leaves must land: a payout the LP's own account cannot
+            // take (less than an ED of native on an account holding none,
+            // say) is refused as such, not as whatever the asset's pallet
+            // says halfway through.
+            ensure!(
+                Self::can_credit(asset_a.clone(), who, pay_a)
+                    && Self::can_credit(asset_b.clone(), who, pay_b),
                 Error::<T>::RecipientCannotReceive
             );
 

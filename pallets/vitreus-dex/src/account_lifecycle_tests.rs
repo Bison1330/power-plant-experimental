@@ -7,8 +7,16 @@
 //! hold, not how a fix achieves it; where a fix may either refuse an
 //! operation up front or make it work, the test accepts both.
 
-use crate::{mock::*, Pools};
+use crate::{mock::*, AmmBase};
 use frame_support::assert_ok;
+
+/// `who`'s LP tokens in the pool of `a` and `b`.
+fn lp_of(who: AccountId, a: &NativeOrAssetId, b: &NativeOrAssetId) -> u128 {
+    <Test as crate::Config>::Base::lp_balance(a, b, &who)
+}
+fn pool_account(a: NativeOrAssetId, b: NativeOrAssetId) -> AccountId {
+    VitreusDex::pool_account_for(a, b).unwrap()
+}
 
 fn native() -> NativeOrAssetId {
     NativeOrAssetId::Native
@@ -149,8 +157,7 @@ fn pool_without_native_side_can_be_funded() {
 fn pool_against_sufficient_token_still_takes_liquidity_after_its_last_lp_leaves() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 10 * UNIT);
-        let pair = VitreusDex::canonical_pair(native(), sufficient());
-        let shares = crate::LiquidityPositions::<Test>::get(ALICE, &pair).expect("position").shares;
+        let shares = lp_of(ALICE, &native(), &sufficient());
         if VitreusDex::remove_liquidity(
             RuntimeOrigin::signed(ALICE),
             native(),
@@ -190,8 +197,7 @@ fn lps_exit_never_destroys_another_lps_share_of_pool() {
             0,
             0,
         ));
-        let pair = VitreusDex::canonical_pair(native(), sufficient());
-        let shares = crate::LiquidityPositions::<Test>::get(ALICE, &pair).expect("position").shares;
+        let shares = lp_of(ALICE, &native(), &sufficient());
         if VitreusDex::remove_liquidity(
             RuntimeOrigin::signed(ALICE),
             native(),
@@ -205,7 +211,7 @@ fn lps_exit_never_destroys_another_lps_share_of_pool() {
             return;
         }
 
-        let pool_account = Pools::<Test>::get(&pair).expect("pool").pool_account;
+        let pool_account = pool_account(native(), sufficient());
         assert!(native_of(pool_account) > 0, "BOB's native left with ALICE's exit");
     });
 }
@@ -214,8 +220,7 @@ fn lps_exit_never_destroys_another_lps_share_of_pool() {
 fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 3 * RUNTIME_ED);
-        let pair = VitreusDex::canonical_pair(native(), sufficient());
-        let pool_account = Pools::<Test>::get(&pair).expect("pool").pool_account;
+        let pool_account = pool_account(native(), sufficient());
         // Enough of the token to buy all but about half an ED of the native.
         let swapped = VitreusDex::swap_exact_tokens_for_tokens(
             RuntimeOrigin::signed(BOB),
@@ -229,12 +234,9 @@ fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
             return;
         }
 
-        let recorded = Pools::<Test>::get(&pair).expect("pool").reserve_a;
-        assert!(recorded > 0, "the swap left native in the pool");
-        // No native was dusted: what the account holds as a reserve is what
-        // the pool records, and the account kept its own ED.
-        assert_eq!(VitreusDex::reserve_balance(native(), &pool_account), recorded);
-        assert!(native_of(pool_account) >= RUNTIME_ED);
+        // No native was dusted: the pool keeps at least an ED of it, which
+        // belongs to its LPs (the base pool's reserves are its balances).
+        assert!(native_of(pool_account) >= RUNTIME_ED, "the swap left native in the pool");
     });
 }
 
@@ -298,10 +300,7 @@ fn high_minimum_pool(native_each: u128, token_each: u128) -> (u32, AccountId) {
         0,
         0
     ));
-    let account = Pools::<Test>::get(VitreusDex::canonical_pair(native(), token))
-        .unwrap()
-        .pool_account;
-    (id, account)
+    (id, pool_account(native(), token))
 }
 
 const HIGH_MINIMUM: u128 = 1_000_000_000;
@@ -322,15 +321,8 @@ fn swap_never_takes_pools_token_remainder_below_its_minimum() {
             1,
             BOB,
         );
-        let recorded = Pools::<Test>::get(VitreusDex::canonical_pair(native(), token))
-            .unwrap()
-            .reserve_b;
-        assert_eq!(
-            VitreusDex::reserve_balance(NativeOrAssetId::WithId(id), &account),
-            recorded,
-            "the pool holds what it records"
-        );
-        assert!(Assets::balance(id, account) >= HIGH_MINIMUM);
+        let _ = token;
+        assert!(Assets::balance(id, account) >= HIGH_MINIMUM, "the remainder was not dusted");
     });
 }
 
@@ -339,8 +331,7 @@ fn lps_exit_never_takes_pools_token_remainder_below_its_minimum() {
     new_runtime_like_ext().execute_with(|| {
         let (id, account) = high_minimum_pool(10 * UNIT, 3 * HIGH_MINIMUM);
         let token = NativeOrAssetId::WithId(id);
-        let pair = VitreusDex::canonical_pair(native(), token.clone());
-        let shares = crate::LiquidityPositions::<Test>::get(ALICE, &pair).unwrap().shares;
+        let shares = lp_of(ALICE, &native(), &token);
         // The locked minimum's share of 3·10^9 is far below 10^9.
         let _ = VitreusDex::remove_liquidity(
             RuntimeOrigin::signed(ALICE),
@@ -350,13 +341,7 @@ fn lps_exit_never_takes_pools_token_remainder_below_its_minimum() {
             0,
             0,
         );
-        let recorded = Pools::<Test>::get(&pair).unwrap().reserve_b;
-        assert_eq!(
-            VitreusDex::reserve_balance(NativeOrAssetId::WithId(id), &account),
-            recorded,
-            "the pool holds what it records"
-        );
-        assert!(Assets::balance(id, account) >= HIGH_MINIMUM);
+        assert!(Assets::balance(id, account) >= HIGH_MINIMUM, "the remainder was not dusted");
     });
 }
 

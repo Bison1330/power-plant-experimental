@@ -1,8 +1,8 @@
 # Tests expected to fail under `cargo test --workspace --features runtime-benchmarks`,
 # as `<crate> <test>`. scripts/test-red-set.sh fails CI when a test fails
 # that is not listed here, or when a listed test passes: the list only
-# changes in a commit that says why. Expected once the two below are settled: the
-# solver marketplace's 22 alone.
+# changes in a commit that says why. Expected once the open questions below are
+# settled: the solver marketplace's 22 alone.
 
 # pallet_solver_marketplace: 22. Red by design: failing-first tests (its account-lifecycle
 # suite and fuzz harness), which the marketplace's own fixes turn green.
@@ -37,3 +37,15 @@ pallet_solver_marketplace fuzz::fuzz_runtime_like_with_outsiders
 # graduates. Whether to force the deferral another way is open.
 pallet_launchpad tests::fm08_crossing_buy_partial_fill_and_deferred_seed
 pallet_launchpad tests::fm11_every_complete_state_has_a_forward_path
+
+# pallet_vitreus_dex: 3.
+# The same open question as the launchpad's two: the native quote's
+# pre-seed sweep now always lands, so this seed no longer fails.
+pallet_vitreus_dex tests::seed_burns_reserved_asset_donation_and_fails_loudly_when_quote_sweep_cannot_land
+# An LP cannot leave in full while others hold only dust: the base pool
+# counts its whole balance as reserve and keeps each reserve at the asset's
+# minimum, where the old core kept a per-pool buffer outside the reserves.
+# The fuzz finds it on the high-minimum asset's pool. Open: accept a
+# remainder of up to the minimum, or keep a buffer.
+pallet_vitreus_dex fuzz::fuzz_dex_runtime_like_with_outsiders
+pallet_vitreus_dex fuzz::fuzz_dex_endowed_fee_escrow_with_outsiders
