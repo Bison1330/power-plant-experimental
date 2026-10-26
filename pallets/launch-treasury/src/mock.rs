@@ -732,5 +732,11 @@ fn build_ext(vault_funded: bool) -> sp_io::TestExternalities {
             vec![VAL_A, VAL_B]
         ));
     });
+    // Commit the setup, so it is part of the state the world starts from. A
+    // benchmark with a component runs once per value, and between runs the
+    // harness drops every change not committed: uncommitted, the fee
+    // routing, targets and vault funding above existed for the first run
+    // only, and the second run's graduation failed with NoDefaultFeeRouting.
+    ext.commit_all().expect("commit the test world's setup");
     ext
 }
