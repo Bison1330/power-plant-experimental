@@ -36,8 +36,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      # Tests run to the end and what fails must be exactly the tests listed
+      # in ci/expected-red/: a new failure fails CI, and so does a listed
+      # test that passes, so the list changes only in a commit.
       - name: Test
-        run: cargo test --workspace --locked --features try-runtime
+        run: scripts/test-red-set.sh try-runtime
 
       - name: Benchmarks compile
         run: cargo check --workspace --locked --features runtime-benchmarks
@@ -49,7 +52,7 @@ jobs:
       # dependencies, which is how the launchpad and launch-treasury mocks
       # stopped compiling under it unseen.
       - name: Test with benchmarks
-        run: cargo test --workspace --locked --features runtime-benchmarks
+        run: scripts/test-red-set.sh runtime-benchmarks
 
       # rustfmt.toml is power-plant's; the pinned toolchain's rustfmt and
       # power-plant's nightly check agree on every file here.
