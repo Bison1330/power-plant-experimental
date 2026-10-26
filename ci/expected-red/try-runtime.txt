@@ -1,8 +1,8 @@
 # Tests expected to fail under `cargo test --workspace --features try-runtime`,
 # as `<crate> <test>`. scripts/test-red-set.sh fails CI when a test fails
 # that is not listed here, or when a listed test passes: the list only
-# changes in a commit that says why. Expected once the open questions below are
-# settled: the solver marketplace's 22 alone.
+# changes in a commit that says why. Expected: the solver marketplace's 22 alone,
+# until its own fixes land.
 
 # pallet_solver_marketplace: 22. Red by design: failing-first tests (its account-lifecycle
 # suite and fuzz harness), which the marketplace's own fixes turn green.
@@ -29,15 +29,3 @@ pallet_solver_marketplace account_lifecycle_tests::last_native_intent_can_be_can
 pallet_solver_marketplace fuzz::fuzz_endowed_escrows_with_outsiders
 pallet_solver_marketplace fuzz::fuzz_runtime_like_with_outsiders
 
-
-# pallet_vitreus_dex: 2. Open: an LP whose payout of one asset rounds to
-# nothing cannot exit at all, though its share of the other is worth more.
-# The base pallet refuses an exit that pays nothing on a side; the old core
-# paid the other side alone. What is at stake is bounded by the price of one
-# unit of the scarcer asset at the pool's own ratio, which only a pool
-# drained to a few units of one side makes large: the fuzz finds it after a
-# huge swap leaves a pool with ~10^5 units of VNRG, one unit then worth
-# ~1 VTRS. (Exits short of the asset's minimum are accepted: an LP exits in
-# full, or all but the remainder the minimum requires.)
-pallet_vitreus_dex fuzz::fuzz_dex_runtime_like_with_outsiders
-pallet_vitreus_dex fuzz::fuzz_dex_endowed_fee_escrow_with_outsiders

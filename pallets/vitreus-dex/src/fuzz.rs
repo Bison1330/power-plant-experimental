@@ -525,12 +525,14 @@ impl World {
                 self,
             );
         }
-        // Every LP but the pool's last may leave: in full, or all but the
+        // What the pallet guarantees an LP's exit: in full, or all but the
         // remainder the asset's minimum requires (the base pool keeps each
         // reserve at least at its minimum, so while the others hold only
         // dust an LP cannot take it all; it keeps the LP tokens for it and
-        // redeems them once they leave). The last leaves all but what the
-        // pool must keep, which is not judged here. A position under a lock
+        // redeems them once they leave). A position worth less than one unit
+        // of an asset's payout cannot be redeemed (the base pallet refuses an
+        // exit paying nothing on a side). Judged for every LP but the pool's
+        // last, who leaves all but what the pool must keep. A position under a lock
         // (the seed's, for good) stays.
         for asset in POOL_ASSETS {
             let pair = VitreusDex::canonical_pair(native(), kind(asset));
@@ -587,8 +589,9 @@ impl World {
 /// that minimum does not bind (the full exit is owed), `Some(None)` when it
 /// leaves the LP nothing it can be paid (a reserve already at its minimum,
 /// or an exit that fits paying nothing on a side), and `Some(Some(l))` for
-/// the most LP tokens it lets go. A payout of nothing from rounding alone,
-/// with room above the minimum, is not excused.
+/// the most LP tokens it lets go. A full exit paying nothing on a side,
+/// with room above the minimum, is a position worth less than one unit of
+/// that asset's payout: it cannot be redeemed (`Some(None)`).
 fn exit_keeping_minimums(asset: u32, shares: u128) -> Option<Option<u128>> {
     use frame_support::traits::fungibles::Inspect;
     let (r_native, r_token) = <Test as Config>::Base::reserves(&native(), &kind(asset))?;
@@ -605,8 +608,9 @@ fn exit_keeping_minimums(asset: u32, shares: u128) -> Option<Option<u128>> {
     }
     let (full_native, full_token) = (pays(shares, r_native), pays(shares, r_token));
     if full_native <= room_native && full_token <= room_token {
-        // The minimum does not bind; a payout of nothing is rounding.
-        return None;
+        // The minimum does not bind. A payout of nothing on a side is a
+        // position worth less than one unit of it, which cannot be redeemed.
+        return if full_native == 0 || full_token == 0 { Some(None) } else { None };
     }
     // The largest l with floor(l · reserve / issuance) ≤ room.
     let most = |reserve: u128, room: u128| -> u128 {
