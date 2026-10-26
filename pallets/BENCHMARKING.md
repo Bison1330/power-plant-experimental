@@ -254,3 +254,20 @@ weights to reach a live chain (weights are compiled into the runtime), and
 `benchmark overhead` (block and extrinsic base weights, in the consumer's
 `runtime/vitreus/src/weights/`) is a separate exercise on the same hardware
 if those were never measured either.
+
+## Not reproduced: a 0.1 VTRS gap in a launchpad benchmark's seed check
+
+Once, while the launchpad's benchmarks were being ported to the base pool,
+`bench_graduate` and `bench_buy_crossing` failed `assert_swept`'s "pool holds
+the raised VTRS and nothing parked" with the pool at
+2999999996250000004688 and the expected figure at 3000000096250000004688:
+10^17 apart, which is neither the mock's ED (10^14) nor any amount the
+benchmark parks. A rerun printing the figures showed the pool holding
+exactly `raise_at_sellout`, and the benchmarks have passed since. The cause
+is unknown. One lead: the launchpad test fm11 once produced the same
+figure, raise + 10^17, while it still gave the pool account an ED before
+the first deposit; the rescue's deposit at the skewed ratio magnified that
+ED about 1,000 times. Nothing in the benchmark gives the pool account an
+ED, so the lead is unconfirmed. If a seed check, or the pool's native balance after a seed, is
+off by 10^17 in a benchmark run (here or on the benchmarking machine), it
+is this, and it needs its cause found before the weights are taken.

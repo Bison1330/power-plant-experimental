@@ -525,9 +525,13 @@ impl World {
                 self,
             );
         }
-        // Every LP but the pool's last may leave in full; the last leaves
-        // all but what the pool must keep, which is not judged here. A
-        // position under a lock (the seed's, for good) stays.
+        // Every LP but the pool's last may leave: in full, or all but the
+        // remainder the asset's minimum requires (the base pool keeps each
+        // reserve at least at its minimum, so while the others hold only
+        // dust an LP cannot take it all; it keeps the LP tokens for it and
+        // redeems them once they leave). The last leaves all but what the
+        // pool must keep, which is not judged here. A position under a lock
+        // (the seed's, for good) stays.
         for asset in POOL_ASSETS {
             let pair = VitreusDex::canonical_pair(native(), kind(asset));
             for who in ACTORS {
@@ -549,6 +553,26 @@ impl World {
                     0,
                     0,
                 );
+                let refused_by_minimum = exit == Err(Error::<Test>::ReserveBelowMinimum.into())
+                    || exit == Err(Error::<Test>::ZeroAmount.into());
+                let exit = if refused_by_minimum {
+                    match exit_keeping_minimums(asset, shares) {
+                        // The minimum does not bind: no excuse.
+                        None => exit,
+                        // It leaves this LP nothing it can be paid.
+                        Some(None) => Ok(()),
+                        Some(Some(most)) => VitreusDex::remove_liquidity(
+                            RuntimeOrigin::signed(who),
+                            native(),
+                            kind(asset),
+                            most,
+                            0,
+                            0,
+                        ),
+                    }
+                } else {
+                    exit
+                };
                 if exit != Err(Error::<Test>::RecipientCannotReceive.into()) {
                     stuck("an LP's exit", exit, self);
                 }
@@ -556,6 +580,45 @@ impl World {
         }
         self.check_invariants("drain");
     }
+}
+
+/// The exit the pallet owes an LP of `shares` in the native pool of `asset`
+/// when it keeps each reserve at least its asset's minimum: `None` when
+/// that minimum does not bind (the full exit is owed), `Some(None)` when it
+/// leaves the LP nothing it can be paid (a reserve already at its minimum,
+/// or an exit that fits paying nothing on a side), and `Some(Some(l))` for
+/// the most LP tokens it lets go. A payout of nothing from rounding alone,
+/// with room above the minimum, is not excused.
+fn exit_keeping_minimums(asset: u32, shares: u128) -> Option<Option<u128>> {
+    use frame_support::traits::fungibles::Inspect;
+    let (r_native, r_token) = <Test as Config>::Base::reserves(&native(), &kind(asset))?;
+    let issuance = <Test as Config>::Base::lp_issuance(&native(), &kind(asset));
+    let wide = sp_core::U256::from;
+    let pays = |l: u128, reserve: u128| -> u128 {
+        (wide(l) * wide(reserve) / wide(issuance)).try_into().unwrap_or(u128::MAX)
+    };
+    let room_native = r_native.saturating_sub(<Test as Config>::Assets::minimum_balance(native()));
+    let room_token = r_token.saturating_sub(<Test as Config>::Assets::minimum_balance(kind(asset)));
+    if room_native == 0 || room_token == 0 {
+        // A reserve at its minimum: nothing can leave that side.
+        return Some(None);
+    }
+    let (full_native, full_token) = (pays(shares, r_native), pays(shares, r_token));
+    if full_native <= room_native && full_token <= room_token {
+        // The minimum does not bind; a payout of nothing is rounding.
+        return None;
+    }
+    // The largest l with floor(l · reserve / issuance) ≤ room.
+    let most = |reserve: u128, room: u128| -> u128 {
+        ((wide(room + 1) * wide(issuance) - 1) / wide(reserve))
+            .try_into()
+            .unwrap_or(u128::MAX)
+    };
+    let l = shares.min(most(r_native, room_native)).min(most(r_token, room_token));
+    if pays(l, r_native) == 0 || pays(l, r_token) == 0 {
+        return Some(None);
+    }
+    Some(Some(l))
 }
 
 /// Every LP token of every pool is an actor's or the pool account's locked

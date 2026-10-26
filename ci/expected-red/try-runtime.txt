@@ -29,23 +29,15 @@ pallet_solver_marketplace account_lifecycle_tests::last_native_intent_can_be_can
 pallet_solver_marketplace fuzz::fuzz_endowed_escrows_with_outsiders
 pallet_solver_marketplace fuzz::fuzz_runtime_like_with_outsiders
 
-# pallet_launchpad: 2. Deferred graduation through a pre-seed sweep that
-# cannot land. Both force the deferral by parking native at the pool address
-# that the sweep cannot deliver to the excess recipient. The base pool keeps
-# nothing of its own, so the sweep now takes the whole donation, which is at
-# least an ED and always lands: the seed no longer fails, and the launch
-# graduates. Whether to force the deferral another way is open.
-pallet_launchpad tests::fm08_crossing_buy_partial_fill_and_deferred_seed
-pallet_launchpad tests::fm11_every_complete_state_has_a_forward_path
 
-# pallet_vitreus_dex: 3.
-# The same open question as the launchpad's two: the native quote's
-# pre-seed sweep now always lands, so this seed no longer fails.
-pallet_vitreus_dex tests::seed_burns_reserved_asset_donation_and_fails_loudly_when_quote_sweep_cannot_land
-# An LP cannot leave in full while others hold only dust: the base pool
-# counts its whole balance as reserve and keeps each reserve at the asset's
-# minimum, where the old core kept a per-pool buffer outside the reserves.
-# The fuzz finds it on the high-minimum asset's pool. Open: accept a
-# remainder of up to the minimum, or keep a buffer.
+# pallet_vitreus_dex: 2. Open: an LP whose payout of one asset rounds to
+# nothing cannot exit at all, though its share of the other is worth more.
+# The base pallet refuses an exit that pays nothing on a side; the old core
+# paid the other side alone. What is at stake is bounded by the price of one
+# unit of the scarcer asset at the pool's own ratio, which only a pool
+# drained to a few units of one side makes large: the fuzz finds it after a
+# huge swap leaves a pool with ~10^5 units of VNRG, one unit then worth
+# ~1 VTRS. (Exits short of the asset's minimum are accepted: an LP exits in
+# full, or all but the remainder the minimum requires.)
 pallet_vitreus_dex fuzz::fuzz_dex_runtime_like_with_outsiders
 pallet_vitreus_dex fuzz::fuzz_dex_endowed_fee_escrow_with_outsiders
