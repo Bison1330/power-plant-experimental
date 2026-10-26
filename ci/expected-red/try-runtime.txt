@@ -29,11 +29,8 @@ pallet_solver_marketplace account_lifecycle_tests::last_native_intent_can_be_can
 pallet_solver_marketplace fuzz::fuzz_endowed_escrows_with_outsiders
 pallet_solver_marketplace fuzz::fuzz_runtime_like_with_outsiders
 
-# pallet_launchpad: 22. Need a graduated launch. Seeding refuses (Unavailable) until it is
-# rebuilt on LP-token freezes; these come back green with it. One more
-# than graduation: inv_try_state_holds_after_random_sequences sees a
-# Complete launch 4 wei above raise_at_sellout, the state a deferred
-# graduation leaves (decision pending).
+# pallet_launchpad: 21. Need a graduated launch. Seeding refuses (Unavailable) until it is
+# rebuilt on LP-token freezes; these come back green with it.
 pallet_launchpad account_lifecycle_tests::donation_of_launch_token_graduates_although_excess_recipient_is_full
 pallet_launchpad account_lifecycle_tests::launch_graduates_although_its_pool_address_holds_fifteen_other_tokens
 pallet_launchpad tests::d4_graduated_pool_routes_fees_and_the_launch_recipient_claims_them
@@ -49,7 +46,6 @@ pallet_launchpad tests::fm10_params_change_does_not_touch_live_launch
 pallet_launchpad tests::fm11_every_complete_state_has_a_forward_path
 pallet_launchpad tests::fm11_seed_overflow_is_impossible
 pallet_launchpad tests::fm13_dump_model_exposes_concentration
-pallet_launchpad tests::inv_try_state_holds_after_random_sequences
 pallet_launchpad tests::l1_migration_v1_re_encodes_pre_l1_launches_curves_and_params
 pallet_launchpad tests::l2_buy_for_runs_the_hook_and_can_graduate
 pallet_launchpad tests::lifecycle_happy_path
