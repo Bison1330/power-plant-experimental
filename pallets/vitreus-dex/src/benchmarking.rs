@@ -156,12 +156,17 @@ mod benchmarks {
         Ok(())
     }
 
-    /// Dearer branch: the provider already holds a position in the pool.
+    /// The dearer branch: the first deposit into a pool whose record exists,
+    /// so the base pool is created with it — its LP token, and the pool
+    /// account's token account opened on a deposit for a non-sufficient
+    /// asset — and the provider's LP-token account opened.
     #[benchmark]
     fn add_liquidity() {
         let caller: T::AccountId = whitelisted_caller();
-        let asset = setup_pool::<T>(&caller);
-        let before = T::Base::lp_balance(&native::<T>(), &asset, &caller);
+        fund_native::<T>(&caller);
+        let asset = setup_asset_with::<T>(ASSET_A, &[&caller], false);
+        Dex::<T>::do_create_pool(native::<T>(), asset.clone(), FEE_TIER).expect("create pool");
+        assert!(!T::Base::pool_exists(&native::<T>(), &asset));
 
         #[extrinsic_call]
         _(
@@ -174,15 +179,23 @@ mod benchmarks {
             Zero::zero(),
         );
 
-        assert!(T::Base::lp_balance(&native::<T>(), &asset, &caller) > before);
+        assert!(T::Base::pool_exists(&native::<T>(), &asset));
+        assert!(!T::Base::lp_balance(&native::<T>(), &asset, &caller).is_zero());
     }
 
+    /// The dearer branch: the provider's lock has passed its block, so the
+    /// remove lifts its freeze and drops its record first.
     #[benchmark]
     fn remove_liquidity() {
         let caller: T::AccountId = whitelisted_caller();
         let asset = setup_pool::<T>(&caller);
         let shares = T::Base::lp_balance(&native::<T>(), &asset, &caller);
         let half = shares / 2u32.into();
+        let pair = Dex::<T>::canonical_pair(native::<T>(), asset.clone());
+        let now = frame_system::Pallet::<T>::block_number();
+        Dex::<T>::do_lock_liquidity_for(&caller, native::<T>(), asset.clone(), now + 1u32.into())
+            .expect("lock");
+        frame_system::Pallet::<T>::set_block_number(now + 2u32.into());
 
         #[extrinsic_call]
         _(
@@ -195,6 +208,7 @@ mod benchmarks {
         );
 
         assert_eq!(T::Base::lp_balance(&native::<T>(), &asset, &caller), shares - half);
+        assert!(LiquidityLocks::<T>::get(&pair, &caller).is_none());
     }
 
     #[benchmark]
