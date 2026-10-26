@@ -4,11 +4,15 @@ use super::*;
 use crate as pallet_vitreus_dex;
 
 use frame_support::{
-    construct_runtime, derive_impl, parameter_types,
-    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32},
+    construct_runtime, derive_impl,
+    instances::Instance2,
+    parameter_types,
+    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32, NeverEnsureOrigin},
+    PalletId,
 };
 use frame_system::{EnsureRoot, EnsureSigned};
-use sp_runtime::{traits::IdentityLookup, BuildStorage};
+use pallet_asset_conversion::{AccountIdConverter, Ascending, Chain, WithFirstAsset};
+use sp_runtime::{traits::IdentityLookup, BuildStorage, Permill};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -21,6 +25,9 @@ construct_runtime!(
         Balances: pallet_balances,
         Assets: pallet_assets,
         VitreusDex: pallet_vitreus_dex,
+        AssetConversion: pallet_asset_conversion,
+        PoolAssets: pallet_assets::<Instance2>,
+        PoolAssetsFreezer: pallet_assets_freezer::<Instance2>,
     }
 );
 
@@ -67,7 +74,79 @@ impl pallet_assets::Config for Test {
 
 pub type NativeOrAssetId = frame_support::traits::fungible::NativeOrWithId<u32>;
 
-type NativeAndAssets = frame_support::traits::fungible::UnionOf<
+/// The LP tokens: a pallet-assets instance of their own with no deposits,
+/// whose accounts only the DEX opens, and whose calls no origin reaches.
+impl pallet_assets::Config<Instance2> for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type Holder = ();
+    type ReserveData = ();
+    type Balance = u128;
+    type RemoveItemsLimit = ConstU32<1000>;
+    type AssetId = u32;
+    type AssetIdParameter = u32;
+    type Currency = Balances;
+    type CreateOrigin = AsEnsureOriginWithArg<NeverEnsureOrigin<AccountId>>;
+    type ForceOrigin = EnsureRoot<Self::AccountId>;
+    type AssetDeposit = ConstU128<0>;
+    type AssetAccountDeposit = ConstU128<0>;
+    type MetadataDepositBase = ConstU128<0>;
+    type MetadataDepositPerByte = ConstU128<0>;
+    type ApprovalDeposit = ConstU128<0>;
+    type StringLimit = ConstU32<50>;
+    type Freezer = PoolAssetsFreezer;
+    type Extra = ();
+    type WeightInfo = ();
+    type CallbackHandle = ();
+    pallet_assets::runtime_benchmarks_enabled! {
+        type BenchmarkHelper = ();
+    }
+}
+
+impl pallet_assets_freezer::Config<Instance2> for Test {
+    type RuntimeFreezeReason = RuntimeFreezeReason;
+    type RuntimeEvent = RuntimeEvent;
+}
+
+parameter_types! {
+    pub const AssetConversionPalletId: PalletId = PalletId(*b"vtrs/amm");
+    pub const BaseLpFee: Permill = Permill::from_parts(3_000);
+    pub const MaxSwapFee: Permill = Permill::from_percent(1);
+    pub const LiquidityWithdrawalFee: Permill = Permill::zero();
+}
+
+pub type PoolIdToAccountId =
+    AccountIdConverter<AssetConversionPalletId, (NativeOrAssetId, NativeOrAssetId)>;
+pub type PoolLocator = Chain<
+    WithFirstAsset<NativeAsset, AccountId, NativeOrAssetId, PoolIdToAccountId>,
+    Ascending<AccountId, NativeOrAssetId, PoolIdToAccountId>,
+>;
+
+impl pallet_asset_conversion::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = u128;
+    type HigherPrecisionBalance = sp_core::U256;
+    type AssetKind = NativeOrAssetId;
+    type Assets = NativeAndAssets;
+    type PoolId = (NativeOrAssetId, NativeOrAssetId);
+    type PoolLocator = PoolLocator;
+    type PoolAssetId = u32;
+    type PoolAssets = PoolAssets;
+    type LPFee = BaseLpFee;
+    type AdminOrigin = crate::EnsureDexAccount<Test>;
+    type MaxSwapFee = MaxSwapFee;
+    type PoolSetupFee = ConstU128<0>;
+    type PoolSetupFeeAsset = NativeAsset;
+    type PoolSetupFeeTarget = ();
+    type LiquidityWithdrawalFee = LiquidityWithdrawalFee;
+    type MintMinLiquidity = ConstU128<{ MINIMUM_LIQUIDITY as u128 }>;
+    type MaxSwapPathLength = ConstU32<2>;
+    type PalletId = AssetConversionPalletId;
+    type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
+}
+
+pub type NativeAndAssets = frame_support::traits::fungible::UnionOf<
     Balances,
     Assets,
     frame_support::traits::fungible::NativeFromLeft,
