@@ -109,10 +109,11 @@ impl pallet_assets::Config for Test {
 // unification can switch it on from a sibling crate in the same `cargo test`).
 pallet_assets::runtime_benchmarks_enabled! {
     pub struct AssetsBenchmarkHelper;
-    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>> for AssetsBenchmarkHelper {
+    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>, ()> for AssetsBenchmarkHelper {
         fn create_asset_id_parameter(id: u32) -> parity_scale_codec::Compact<u128> {
             parity_scale_codec::Compact(id.into())
         }
+        fn create_reserve_id_parameter(_: u32) {}
     }
 }
 
