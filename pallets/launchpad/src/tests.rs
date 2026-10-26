@@ -163,6 +163,16 @@ impl Rng {
     }
 }
 
+/// Buys and sells on launch `id` so far, from its events (never reset in
+/// these tests).
+fn trades(id: LaunchId) -> (u128, u128) {
+    System::events().iter().fold((0, 0), |(b, s), r| match &r.event {
+        RuntimeEvent::Launchpad(Event::Bought { launch_id, .. }) if *launch_id == id => (b + 1, s),
+        RuntimeEvent::Launchpad(Event::Sold { launch_id, .. }) if *launch_id == id => (b, s + 1),
+        _ => (b, s),
+    })
+}
+
 /// I1, I2, I3 (over the given holders), I5, I6 — the storage-level invariants.
 fn check_invariants(id: LaunchId, holders: &[Acc]) {
     let s = state(id);
@@ -196,9 +206,25 @@ fn check_invariants(id: LaunchId, holders: &[Acc]) {
             assert!(s.lp_shares > 0, "I6 lp_shares");
         },
     }
-    // I5
+    // The raise stays within what selling out costs. `raise_at_sellout`
+    // prices that at the curve's original k; every trade rounds in the
+    // curve's favour and leaves k a little higher, and the buy that sells out
+    // is priced at the k it finds, so a sold-out curve can hold a few wei more.
+    // Each buy's rounding moves the sell-out price by under one wei. Each
+    // sell keeps under one wei more quote at a token reserve of at most V_t,
+    // which at sell-out (reserve token_floor) is worth under V_t / token_floor
+    // wei. Anything above that is not rounding.
     let q_max = curve::raise_at_sellout(&t, SELLABLE).unwrap();
-    assert!(s.real_quote <= q_max, "I5 real_quote {} > {}", s.real_quote, q_max);
+    let (buys, sells) = trades(id);
+    let per_sell = (t.token_floor + SELLABLE).div_ceil(t.token_floor);
+    let rounding = buys + sells * per_sell;
+    assert!(
+        s.real_quote <= q_max + rounding,
+        "I5 real_quote {} > {} + {} ({buys} buys, {sells} sells)",
+        s.real_quote,
+        q_max,
+        rounding
+    );
     assert!(s.tokens_remaining <= SELLABLE, "I5 tokens_remaining");
 }
 
@@ -302,6 +328,44 @@ fn lifecycle_initial_buy_completes_curve() {
         assert_eq!(state(id).phase, Phase::Graduated);
         assert_eq!(tok(id, ALICE), SELLABLE);
         assert!(VitreusDex::pool_exists(native(), kind(id)));
+    });
+}
+
+/// The raise check allows what rounding can explain and no more: a raise exactly
+/// at `raise_at_sellout` plus that allowance holds, one wei past it does not.
+#[test]
+fn raise_check_tells_rounding_from_raise_too_large() {
+    new_test_ext().execute_with(|| {
+        let id = create(ALICE);
+        buy(BOB, id, 100 * UNIT);
+        sell(BOB, id, tok(id, BOB) / 2);
+        buy(CHARLIE, id, 50 * UNIT);
+        check_invariants(id, &[ALICE, BOB, CHARLIE]);
+
+        let t = terms(id);
+        let (buys, sells) = trades(id);
+        assert_eq!((buys, sells), (2, 1), "two buys and a sell");
+        let per_sell = (t.token_floor + SELLABLE).div_ceil(t.token_floor);
+        let allowed = curve::raise_at_sellout(&t, SELLABLE).unwrap() + buys + sells * per_sell;
+        // Give the escrow what such a raise would hold, so only the raise is in question.
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), escrow(id), 2 * allowed));
+        let set_raise =
+            |q: u128| Curves::<Test>::mutate(id, |c| c.as_mut().unwrap().real_quote = q);
+
+        set_raise(allowed);
+        check_invariants(id, &[ALICE, BOB, CHARLIE]);
+
+        set_raise(allowed + 1);
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_invariants(id, &[ALICE, BOB, CHARLIE])
+        }))
+        .expect_err("one wei past the allowance must trip the raise check");
+        let message = failed
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| failed.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(message.starts_with("I5 real_quote"), "{message}");
     });
 }
 
