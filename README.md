@@ -55,11 +55,13 @@ is a commit here and a pin bump in the consumer; nothing is patched in a consume
 ## Dependency alignment
 
 `[workspace.dependencies]` names polkadot-sdk as `git = "https://github.com/paritytech/polkadot-sdk",
-branch = "stable2407"` — the same strings as `power-plant`'s `Cargo.toml` — and `Cargo.lock` resolves
-it to the same commit. Cargo unifies a git dependency between this workspace and a consumer only when
-the source strings match exactly; a `rev` or `tag` here against a `branch` there would give the
-consumer two `frame-support`s and a type error at every `Config` boundary. When `power-plant` moves
-its lock, move this one to the same commit.
+tag = "polkadot-stable2512-8"` — the strings `power-plant`'s `Cargo.toml` must use too — and
+`Cargo.lock` resolves it to the same commit. Cargo unifies a git dependency between this workspace and
+a consumer only when the source strings match exactly; a `branch` or `rev` there against the `tag` here
+would give the consumer two `frame-support`s and a type error at every `Config` boundary. When
+`power-plant` moves its SDK, move this one to the same tag. `pallet-asset-conversion` is vendored from
+a later release and patched in by name (`vendor/pallet-asset-conversion/VENDORED.md`); a consumer
+applies the same `[patch]`.
 
 ## Developing
 
