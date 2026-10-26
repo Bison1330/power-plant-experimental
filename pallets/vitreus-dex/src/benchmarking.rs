@@ -232,26 +232,17 @@ mod benchmarks {
         assert!(!ProtocolFeesUnclaimed::<T>::get().is_zero());
     }
 
-    /// Refused while locks move to freezes on the LP tokens: this measures
-    /// the refusal, until they land.
     #[benchmark]
     fn lock_liquidity() {
         let caller: T::AccountId = whitelisted_caller();
         let asset = setup_pool::<T>(&caller);
+        let pair = Dex::<T>::canonical_pair(native::<T>(), asset.clone());
         let until = frame_system::Pallet::<T>::block_number() + 100u32.into();
-        let result;
 
-        #[block]
-        {
-            result = Dex::<T>::lock_liquidity(
-                RawOrigin::Signed(caller).into(),
-                native::<T>(),
-                asset,
-                until,
-            );
-        }
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller.clone()), native::<T>(), asset, until);
 
-        assert!(result.is_err());
+        assert_eq!(LiquidityLocks::<T>::get(&pair, &caller), Some(until));
     }
 
     // ---- D4 ---------------------------------------------------------------

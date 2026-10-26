@@ -104,6 +104,8 @@ impl frame_system::Config for Test {
 #[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
 impl pallet_balances::Config for Test {
     type Balance = u128;
+    // The DEX freezes LP tokens; balances shares the runtime's freeze reasons.
+    type MaxFreezes = frame_support::traits::VariantCountOf<RuntimeFreezeReason>;
     type ExistentialDeposit = ConstU128<ED>;
     type AccountStore = System;
     type MaxLocks = ConstU32<4>;
@@ -201,7 +203,8 @@ impl pallet_vitreus_dex::Config for Test {
     type CreatorFeeRecipient = LaunchpadCreators;
     // D9: the DEX pushes the treasury slice into this pallet.
     type TreasurySink = LaunchTreasury;
-    type Base = pallet_vitreus_dex::AssetConversionAdapter<Self>;
+    type Base = pallet_vitreus_dex::AssetConversionAdapter<Self, PoolAssetsFreezer>;
+    type RuntimeFreezeReason = RuntimeFreezeReason;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();

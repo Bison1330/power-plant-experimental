@@ -8,8 +8,9 @@
 //! `BenchmarkHelper`), which would be ambiguous in this pallet and in every
 //! pallet built on it. A runtime binds it to [`AssetConversionAdapter`].
 
+use frame_support::traits::Get;
 use frame_support::traits::{
-    fungibles::{Balanced, Credit, Inspect, Refund},
+    fungibles::{Balanced, Credit, Inspect, MutateFreeze, Refund},
     AccountTouch,
 };
 use pallet_asset_conversion::{MutateLiquidity, PoolLocator, Pools, SwapCredit};
@@ -29,6 +30,9 @@ where
 {
     /// The registry the base pallet's pools hold; the DEX's `Config::Assets`.
     type Assets: Inspect<AccountId, AssetId = AssetKind, Balance = Balance> + Balanced<AccountId>;
+
+    /// What a freeze on LP tokens is named by: the runtime's freeze reason.
+    type FreezeId;
 
     /// Create the pool with LP fee `fee`. `creator` pays the deposits that
     /// open the pool account's token accounts. Nothing else can set or change
@@ -59,6 +63,10 @@ where
 
     /// Every LP token of the pool, the pool account's locked minimum included.
     fn lp_issuance(asset_a: &AssetKind, asset_b: &AssetKind) -> Balance;
+
+    /// The LP tokens a first deposit locks in the pool account, and what
+    /// every deposit must mint more than.
+    fn min_liquidity() -> Balance;
 
     /// Open `who`'s LP-token account if it has none: deposit-backed, which
     /// takes no consumer reference. The base pallet mints into an unopened
@@ -96,6 +104,34 @@ where
         credit_in: Credit<AccountId, Self::Assets>,
     ) -> CreditSwap<AccountId, Self::Assets>;
 
+    /// How much of `who`'s LP tokens in the pool the freeze `id` holds.
+    fn lp_frozen(
+        asset_a: &AssetKind,
+        asset_b: &AssetKind,
+        who: &AccountId,
+        id: &Self::FreezeId,
+    ) -> Balance;
+
+    /// Set the freeze `id` on `who`'s LP tokens in the pool to `amount`.
+    /// Frozen LP tokens cannot be burned, so they cannot be withdrawn; the
+    /// LP instance has no calls, so nothing but this pallet sets or lifts a
+    /// freeze.
+    fn set_lp_freeze(
+        asset_a: &AssetKind,
+        asset_b: &AssetKind,
+        who: &AccountId,
+        id: &Self::FreezeId,
+        amount: Balance,
+    ) -> DispatchResult;
+
+    /// Lift the freeze `id` from `who`'s LP tokens in the pool.
+    fn thaw_lp(
+        asset_a: &AssetKind,
+        asset_b: &AssetKind,
+        who: &AccountId,
+        id: &Self::FreezeId,
+    ) -> DispatchResult;
+
     /// What swapping `amount_in` of `asset_in` for `asset_out` pays at the
     /// pool's fee, from the live reserves.
     fn amount_out(
@@ -105,12 +141,13 @@ where
     ) -> Option<Balance>;
 }
 
-/// [`AmmBase`] on pallet-asset-conversion in runtime `R`. Signs as the DEX's
-/// own account where the base pallet asks for its `AdminOrigin`, which the
-/// runtime binds to [`crate::EnsureDexAccount`].
-pub struct AssetConversionAdapter<R>(core::marker::PhantomData<R>);
+/// [`AmmBase`] on pallet-asset-conversion in runtime `R`, with `F` freezing
+/// its LP tokens (pallet-assets-freezer on the LP instance). Signs as the
+/// DEX's own account where the base pallet asks for its `AdminOrigin`, which
+/// the runtime binds to [`crate::EnsureDexAccount`].
+pub struct AssetConversionAdapter<R, F>(core::marker::PhantomData<(R, F)>);
 
-impl<R> AssetConversionAdapter<R>
+impl<R, F> AssetConversionAdapter<R, F>
 where
     R: pallet_asset_conversion::Config,
 {
@@ -120,11 +157,47 @@ where
     }
 }
 
-impl<R> AmmBase<R::AccountId, R::AssetKind, R::Balance> for AssetConversionAdapter<R>
+impl<R, F> AmmBase<R::AccountId, R::AssetKind, R::Balance> for AssetConversionAdapter<R, F>
 where
     R: pallet_asset_conversion::Config,
+    F: MutateFreeze<R::AccountId, AssetId = R::PoolAssetId, Balance = R::Balance>,
 {
     type Assets = R::Assets;
+    type FreezeId = F::Id;
+
+    fn lp_frozen(
+        asset_a: &R::AssetKind,
+        asset_b: &R::AssetKind,
+        who: &R::AccountId,
+        id: &F::Id,
+    ) -> R::Balance {
+        Self::lp_token(asset_a, asset_b)
+            .map(|lp| F::balance_frozen(lp, id, who))
+            .unwrap_or_default()
+    }
+
+    fn set_lp_freeze(
+        asset_a: &R::AssetKind,
+        asset_b: &R::AssetKind,
+        who: &R::AccountId,
+        id: &F::Id,
+        amount: R::Balance,
+    ) -> DispatchResult {
+        let lp = Self::lp_token(asset_a, asset_b)
+            .ok_or(pallet_asset_conversion::Error::<R>::PoolNotFound)?;
+        F::set_freeze(lp, id, who, amount)
+    }
+
+    fn thaw_lp(
+        asset_a: &R::AssetKind,
+        asset_b: &R::AssetKind,
+        who: &R::AccountId,
+        id: &F::Id,
+    ) -> DispatchResult {
+        let lp = Self::lp_token(asset_a, asset_b)
+            .ok_or(pallet_asset_conversion::Error::<R>::PoolNotFound)?;
+        F::thaw(lp, id, who)
+    }
 
     fn create_pool(
         creator: &R::AccountId,
@@ -178,6 +251,10 @@ where
         Self::lp_token(asset_a, asset_b)
             .map(R::PoolAssets::total_issuance)
             .unwrap_or_default()
+    }
+
+    fn min_liquidity() -> R::Balance {
+        R::MintMinLiquidity::get()
     }
 
     fn open_lp_account(

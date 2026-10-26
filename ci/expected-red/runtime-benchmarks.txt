@@ -1,8 +1,8 @@
 # Tests expected to fail under `cargo test --workspace --features runtime-benchmarks`,
 # as `<crate> <test>`. scripts/test-red-set.sh fails CI when a test fails
 # that is not listed here, or when a listed test passes: the list only
-# changes in a commit that says why. Expected size once seeding and locks
-# are rebuilt: the solver marketplace's 22 alone.
+# changes in a commit that says why. Expected once the two below are settled: the
+# solver marketplace's 22 alone.
 
 # pallet_solver_marketplace: 22. Red by design: failing-first tests (its account-lifecycle
 # suite and fuzz harness), which the marketplace's own fixes turn green.
@@ -29,79 +29,11 @@ pallet_solver_marketplace account_lifecycle_tests::last_native_intent_can_be_can
 pallet_solver_marketplace fuzz::fuzz_endowed_escrows_with_outsiders
 pallet_solver_marketplace fuzz::fuzz_runtime_like_with_outsiders
 
-# pallet_launchpad: 24. Need a graduated launch. Seeding refuses (Unavailable) until it is
-# rebuilt on LP-token freezes; these come back green with it.
-pallet_launchpad account_lifecycle_tests::donation_of_launch_token_graduates_although_excess_recipient_is_full
-pallet_launchpad account_lifecycle_tests::launch_graduates_although_its_pool_address_holds_fifteen_other_tokens
-pallet_launchpad benchmarking::benchmarks::bench_buy_crossing
-pallet_launchpad benchmarking::benchmarks::bench_force_seed_into_existing_pool
-pallet_launchpad benchmarking::benchmarks::bench_graduate
-pallet_launchpad tests::d4_graduated_pool_routes_fees_and_the_launch_recipient_claims_them
-pallet_launchpad tests::fm01_only_launchpad_can_seed_reserved_pool
-pallet_launchpad tests::fm01_seed_into_existing_liquid_pool_is_rejected
-pallet_launchpad tests::fm02_prefunded_pool_account_does_not_move_opening_price
-pallet_launchpad tests::fm03_flash_style_complete_then_extract
-pallet_launchpad tests::fm04_donation_to_escrow_is_inert
-pallet_launchpad tests::fm06_no_creator_lp_and_position_is_permanent
+# pallet_launchpad: 2. Deferred graduation through a pre-seed sweep that
+# cannot land. Both force the deferral by parking native at the pool address
+# that the sweep cannot deliver to the excess recipient. The base pool keeps
+# nothing of its own, so the sweep now takes the whole donation, which is at
+# least an ED and always lands: the seed no longer fails, and the launch
+# graduates. Whether to force the deferral another way is open.
 pallet_launchpad tests::fm08_crossing_buy_partial_fill_and_deferred_seed
-pallet_launchpad tests::fm08_min_tokens_out_respected_on_partial_fill
-pallet_launchpad tests::fm10_params_change_does_not_touch_live_launch
 pallet_launchpad tests::fm11_every_complete_state_has_a_forward_path
-pallet_launchpad tests::fm11_seed_overflow_is_impossible
-pallet_launchpad tests::fm13_dump_model_exposes_concentration
-pallet_launchpad tests::l1_migration_v1_re_encodes_pre_l1_launches_curves_and_params
-pallet_launchpad tests::l2_buy_for_runs_the_hook_and_can_graduate
-pallet_launchpad tests::lifecycle_happy_path
-pallet_launchpad tests::lifecycle_initial_buy_completes_curve
-pallet_launchpad tests::set_launch_metadata_follows_the_creator_fee_recipient
-pallet_launchpad tests::weights_crossing_buy_refunds_when_not_crossing
-
-# pallet_launch_treasury: 47. Need a graduated launch: they stop at the helper asserting graduation,
-# the fuzz runs at graduate (Unavailable). Green again with seeding.
-pallet_launch_treasury account_lifecycle_tests::compound_burns_launch_token_vault_has_never_held_with_its_slots_full
-pallet_launch_treasury benchmarking::benchmarks::bench_compound
-pallet_launch_treasury benchmarking::benchmarks::bench_finalize_retirement
-pallet_launch_treasury benchmarking::benchmarks::bench_harvest
-pallet_launch_treasury benchmarking::benchmarks::bench_retarget
-pallet_launch_treasury benchmarking::benchmarks::bench_retire
-pallet_launch_treasury benchmarking::benchmarks::bench_set_targets
-pallet_launch_treasury benchmarking::benchmarks::bench_stake
-pallet_launch_treasury fuzz::fuzz_from_genesis
-pallet_launch_treasury fuzz::fuzz_upgrade_path
-pallet_launch_treasury tests::finding14_a_sub_ed_routed_slice_does_not_fail_the_swap
-pallet_launch_treasury tests::fm_t11_retirement_can_graduate_a_curve
-pallet_launch_treasury tests::fm_t1_slice_never_exceeds_impact_cap
-pallet_launch_treasury tests::fm_t2_stake_before_reputation_keeps_bond_and_retries
-pallet_launch_treasury tests::fm_t3_retarget_filters_chilled_and_noncollab
-pallet_launch_treasury tests::fm_t4_dry_broker_keeps_lnrg_accrued
-pallet_launch_treasury tests::fm_t6_slash_devalues_every_launch_equally
-pallet_launch_treasury tests::fm_t7_no_more_chunks_is_retryable
-pallet_launch_treasury tests::fm_t8_last_retire_chills_first_and_next_stake_recooperates
-pallet_launch_treasury tests::i_t7_cooperation_matches_active_after_every_bond_change
-pallet_launch_treasury tests::m_v1_recount_makes_stranded_rewards_attributable
-pallet_launch_treasury tests::r10_a_swap_that_would_deliver_nothing_says_so
-pallet_launch_treasury tests::r11_selling_ones_whole_token_position_goes_through
-pallet_launch_treasury tests::r1_rewards_after_a_sale_are_attributed_to_nobody
-pallet_launch_treasury tests::r2_the_treasurys_own_buybacks_reset_the_dormancy_clock
-pallet_launch_treasury tests::r3_a_closed_treasury_is_reopened_by_the_next_fee
-pallet_launch_treasury tests::r5_one_wei_sent_to_the_vault_fails_try_state_forever
-pallet_launch_treasury tests::r7_burn_impact_is_bounded_under_the_venues_round_trip_fee
-pallet_launch_treasury tests::r8_a_sale_never_asks_for_the_vaults_whole_lnrg
-pallet_launch_treasury tests::r9_a_swap_of_ones_whole_balance_keeps_the_ed_instead_of_failing
-pallet_launch_treasury tests::stake_refuses_when_the_vault_is_fully_slashed
-pallet_launch_treasury tests::t_g1_no_origin_can_withdraw
-pallet_launch_treasury tests::t_g2_set_targets_recooperates_without_touching_shares
-pallet_launch_treasury tests::t_l10_sub_ed_bounty_is_paid_to_a_funded_keeper
-pallet_launch_treasury tests::t_l11_sub_ed_bounty_is_refused_to_an_empty_account
-pallet_launch_treasury tests::t_l12_the_vault_is_never_paid_its_own_bounty
-pallet_launch_treasury tests::t_l13_slice_bounty_below_ed_is_paid
-pallet_launch_treasury tests::t_l1_fee_to_pending_to_shares_at_price
-pallet_launch_treasury tests::t_l2_harvest_attributes_by_shares_not_by_time
-pallet_launch_treasury tests::t_l3_compound_burns_everything_it_buys
-pallet_launch_treasury tests::t_l4_retire_requires_dormancy_and_is_one_way
-pallet_launch_treasury tests::t_l5_finalize_credits_every_matured_launch_exactly
-pallet_launch_treasury tests::t_l5b_finalize_prorates_a_slash_across_matured_launches
-pallet_launch_treasury tests::t_l6_snapshotted_terms_survive_set_terms
-pallet_launch_treasury tests::t_l7_i_t1_conservation_under_random_ops
-pallet_launch_treasury tests::t_l8_from_genesis_first_fee_withholds_ed_so_retirement_closes
-pallet_launch_treasury tests::t_l9_burn_slice_pays_the_keeper
