@@ -287,6 +287,15 @@ impl<Balance: sp_runtime::traits::AtLeast32BitUnsigned + Copy, AccountId>
     }
 }
 
+/// An exact-input swap, priced: the routed slices, what reaches the pool,
+/// what the trader receives, and the pool account it moves through.
+struct Priced<Balance, AccountId> {
+    slices: Slices<Balance, AccountId>,
+    to_pool: Balance,
+    amount_out: Balance,
+    pool_account: AccountId,
+}
+
 /// In-runtime interface for pallets that need to create DEX pools and seed
 /// them with liquidity without going through the extrinsic layer.
 ///
@@ -820,6 +829,37 @@ pub mod pallet {
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
             Pallet::<T>::mint_ed_at_genesis(&Pallet::<T>::fee_escrow_account());
+        }
+    }
+
+    /// Quotes, routing included, from the swap's own pricing. The base
+    /// pallet's quotes know only the LP fee and overstate what our pools pay;
+    /// the runtime refuses those two and serves these.
+    #[pallet::view_functions]
+    impl<T: Config> Pallet<T> {
+        /// What `swap_exact_tokens_for_tokens` with exactly `amount_in` of
+        /// `asset_in` would deliver of `asset_out` now, after the routed
+        /// slices and the pool's fee. `None` where the swap would fail: no
+        /// pool or liquidity, an output that rounds to nothing, or more than
+        /// the pool can pay.
+        pub fn quote_exact_tokens_for_tokens(
+            asset_in: T::AssetKind,
+            asset_out: T::AssetKind,
+            amount_in: T::Balance,
+        ) -> Option<T::Balance> {
+            Self::quote_exact_in(asset_in, asset_out, amount_in)
+        }
+
+        /// The input of `asset_in` for which `swap_exact_tokens_for_tokens`
+        /// would deliver at least `amount_out` of `asset_out` now: the
+        /// smallest one, in that one unit less delivers less. `None` where no
+        /// input can (more than the pool can pay) or there is no pool.
+        pub fn quote_tokens_for_exact_tokens(
+            asset_in: T::AssetKind,
+            asset_out: T::AssetKind,
+            amount_out: T::Balance,
+        ) -> Option<T::Balance> {
+            Self::quote_exact_out(asset_in, asset_out, amount_out)
         }
     }
 
@@ -1497,6 +1537,116 @@ pub mod pallet {
             Ok(Slices { protocol, creator, treasury, sink })
         }
 
+        /// What swapping exactly `amount_in` of `asset_in` for `asset_out`
+        /// pays, priced from the pool as it stands: the routed slices, what
+        /// reaches the pool, and what the trader receives. The swap and the
+        /// quotes both price here, so a quote is what the swap would pay now.
+        /// Fails as the swap would: no base pool or no liquidity, an output
+        /// that rounds to nothing, or one the pool cannot pay out and
+        /// keep its own minimum of the asset.
+        fn price_exact_in(
+            pool: &PoolInfo<T::Balance>,
+            asset_in: &T::AssetKind,
+            asset_out: &T::AssetKind,
+            amount_in: T::Balance,
+        ) -> Result<Priced<T::Balance, T::AccountId>, DispatchError> {
+            ensure!(amount_in > Zero::zero(), Error::<T>::ZeroAmount);
+            let pool_account =
+                T::Base::pool_account(asset_in, asset_out).ok_or(Error::<T>::PoolNotFound)?;
+            ensure!(
+                T::Base::reserves(asset_in, asset_out).is_some(),
+                Error::<T>::InsufficientLiquidity
+            );
+            let native = T::NativeAsset::get().encode();
+            let native_in = asset_in.encode() == native;
+            let native_out = asset_out.encode() == native;
+            let other = if native_in { asset_out } else { asset_in };
+
+            let (slices, to_pool) = if native_in {
+                let slices = Self::slices(&pool.routing, amount_in, other)?;
+                let to_pool = amount_in.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
+                (slices, to_pool)
+            } else {
+                (Slices::none(), amount_in)
+            };
+            let gross = T::Base::amount_out(asset_in, asset_out, to_pool)
+                .ok_or(Error::<T>::InsufficientLiquidity)?;
+            ensure!(!gross.is_zero(), Error::<T>::ZeroAmount);
+            // The base pool pays out keeping its own minimum of the asset.
+            ensure!(
+                gross
+                    <= T::Assets::reducible_balance(
+                        asset_out.clone(),
+                        &pool_account,
+                        Preserve,
+                        Polite
+                    ),
+                Error::<T>::InsufficientLiquidity
+            );
+            let (slices, amount_out) = if native_out {
+                let slices = Self::slices(&pool.routing, gross, other)?;
+                let net = gross.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
+                (slices, net)
+            } else {
+                (slices, gross)
+            };
+            ensure!(!amount_out.is_zero(), Error::<T>::ZeroAmount);
+            Ok(Priced { slices, to_pool, amount_out, pool_account })
+        }
+
+        /// [`Pallet::quote_exact_tokens_for_tokens`].
+        fn quote_exact_in(
+            asset_in: T::AssetKind,
+            asset_out: T::AssetKind,
+            amount_in: T::Balance,
+        ) -> Option<T::Balance> {
+            let pool = Pools::<T>::get(Self::canonical_pair(asset_in.clone(), asset_out.clone()))?;
+            Self::price_exact_in(&pool, &asset_in, &asset_out, amount_in)
+                .ok()
+                .map(|p| p.amount_out)
+        }
+
+        /// [`Pallet::quote_tokens_for_exact_tokens`]: a search over the swap's
+        /// own pricing. The routed slices floor one by one, so the output can
+        /// dip by a unit as the input grows by one; the search keeps an input
+        /// that pays enough and one a unit below it that does not.
+        fn quote_exact_out(
+            asset_in: T::AssetKind,
+            asset_out: T::AssetKind,
+            amount_out: T::Balance,
+        ) -> Option<T::Balance> {
+            if amount_out.is_zero() {
+                return None;
+            }
+            let pool = Pools::<T>::get(Self::canonical_pair(asset_in.clone(), asset_out.clone()))?;
+            // What `x` pays: nothing when it is too small to pay anything,
+            // `None` when the pool cannot price it at all.
+            let pays = |x: T::Balance| -> Option<T::Balance> {
+                match Self::price_exact_in(&pool, &asset_in, &asset_out, x) {
+                    Ok(p) => Some(p.amount_out),
+                    Err(e) if e == Error::<T>::ZeroAmount.into() => Some(Zero::zero()),
+                    Err(_) => None,
+                }
+            };
+            // `lo` pays less than `amount_out`, `hi` at least that much.
+            let two: T::Balance = 2u32.into();
+            let mut lo: T::Balance = Zero::zero();
+            let mut hi: T::Balance = One::one();
+            while pays(hi)? < amount_out {
+                lo = hi;
+                hi = hi.checked_mul(&two)?;
+            }
+            while hi - lo > One::one() {
+                let mid = lo + (hi - lo) / two;
+                if pays(mid)? >= amount_out {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            Some(hi)
+        }
+
         /// Execute a swap on behalf of `who`, delivering the output to
         /// `recipient`. Returns the amount delivered.
         ///
@@ -1537,13 +1687,6 @@ pub mod pallet {
 
             let pair = Self::canonical_pair(asset_in.clone(), asset_out.clone());
             let mut pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
-            let pool_account =
-                T::Base::pool_account(&asset_in, &asset_out).ok_or(Error::<T>::PoolNotFound)?;
-            ensure!(
-                T::Base::reserves(&asset_in, &asset_out).is_some(),
-                Error::<T>::InsufficientLiquidity
-            );
-
             let native = T::NativeAsset::get();
             let native_in = asset_in.encode() == native.encode();
             let native_out = asset_out.encode() == native.encode();
@@ -1551,28 +1694,10 @@ pub mod pallet {
             let lp_fee = Self::lp_fee(pool.fee_tier, &pool.routing);
 
             // ---- Price and check everything before anything moves ----------
-            let (slices, to_pool) = if native_in {
-                let slices = Self::slices(&pool.routing, amount_in, &other)?;
-                let to_pool = amount_in.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
-                (slices, to_pool)
-            } else {
-                (Slices::none(), amount_in)
-            };
-            // R10: an input so small its output rounds to nothing is refused
-            // as such.
-            let gross = T::Base::amount_out(&asset_in, &asset_out, to_pool)
-                .ok_or(Error::<T>::InsufficientLiquidity)?;
-            ensure!(!gross.is_zero(), Error::<T>::ZeroAmount);
-            let (slices, amount_out) = if native_out {
-                let slices = Self::slices(&pool.routing, gross, &other)?;
-                let net = gross.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
-                (slices, net)
-            } else {
-                (slices, gross)
-            };
+            let Priced { slices, to_pool, amount_out, pool_account } =
+                Self::price_exact_in(&pool, &asset_in, &asset_out, amount_in)?;
             let Slices { protocol, creator, treasury, sink } = slices;
             ensure!(amount_out >= amount_out_min, Error::<T>::SlippageExceeded);
-            ensure!(!amount_out.is_zero(), Error::<T>::ZeroAmount);
             // The output must land where it is going, as the asset's pallet
             // judges it: below the asset's minimum balance for a new holder,
             // or no consumer reference left to open one, it cannot.

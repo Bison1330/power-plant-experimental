@@ -535,3 +535,155 @@ fn locks_and_seeding_are_refused_until_they_move_to_freezes() {
         );
     });
 }
+
+fn quote_in(a: NativeOrAssetId, b: NativeOrAssetId, x: u128) -> Option<u128> {
+    VitreusDex::quote_exact_tokens_for_tokens(a, b, x)
+}
+fn quote_out(a: NativeOrAssetId, b: NativeOrAssetId, y: u128) -> Option<u128> {
+    VitreusDex::quote_tokens_for_exact_tokens(a, b, y)
+}
+
+/// A launch pool with every slice routed, and a pair with no native side.
+fn quote_world() {
+    launch_pool(1_000 * UNIT, 4_000_000 * UNIT);
+    assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), usdc(), vnrg(), 10));
+    add(ALICE, usdc(), vnrg(), 1_000 * UNIT, 3_000 * UNIT);
+}
+
+#[test]
+fn exact_in_quote_is_what_swap_pays() {
+    let cases = [
+        (native(), launch(), [UNIT / 1_000 + 7, 3 * UNIT + 12_345, 90 * UNIT]),
+        (launch(), native(), [1_000 * UNIT, 40_000 * UNIT + 99, 700_000 * UNIT]),
+        (usdc(), vnrg(), [UNIT, 17 * UNIT + 3, 400 * UNIT]),
+    ];
+    for (a, b, sizes) in cases {
+        for x in sizes {
+            new_runtime_like_ext().execute_with(|| {
+                quote_world();
+                let quoted = quote_in(a.clone(), b.clone(), x).expect("a quote");
+                assert_eq!(swap(BOB, a.clone(), b.clone(), x), quoted, "{a:?} → {b:?}, {x}");
+            });
+        }
+    }
+}
+
+#[test]
+fn exact_out_quote_is_least_input_that_pays_it() {
+    let cases = [
+        (native(), launch(), [1u128, 777 * UNIT, 12_345 * UNIT + 1]),
+        (launch(), native(), [1u128, UNIT / 3, 25 * UNIT + 5]),
+        (usdc(), vnrg(), [1u128, UNIT, 300 * UNIT + 11]),
+    ];
+    for (a, b, wants) in cases {
+        for want in wants {
+            new_runtime_like_ext().execute_with(|| {
+                quote_world();
+                let x = quote_out(a.clone(), b.clone(), want).expect("an input");
+                assert!(quote_in(a.clone(), b.clone(), x).unwrap() >= want);
+                assert!(quote_in(a.clone(), b.clone(), x - 1).unwrap_or(0) < want);
+                assert!(swap(BOB, a.clone(), b.clone(), x) >= want, "{a:?} → {b:?}, {want}");
+            });
+        }
+    }
+}
+
+#[test]
+fn quote_swap_could_not_honour_is_none() {
+    new_runtime_like_ext().execute_with(|| {
+        quote_world();
+        let pool = pool_account(native(), launch());
+        let reserve = balance(native(), pool);
+        // More than the pool holds, or than it can pay and keep its ED.
+        assert_eq!(quote_out(launch(), native(), reserve), None);
+        assert_eq!(quote_out(launch(), native(), reserve - RUNTIME_ED + 1), None);
+        // Nothing to quote: zero, too little to pay anything, no pool, a
+        // record whose first deposit has not come.
+        assert_eq!(quote_in(native(), launch(), 0), None);
+        assert_eq!(quote_out(native(), launch(), 0), None);
+        assert_eq!(quote_in(launch(), native(), 1), None);
+        assert_eq!(quote_in(native(), vnrg(), UNIT), None);
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), vnrg(), 3));
+        assert_eq!(quote_in(native(), vnrg(), UNIT), None);
+        assert_eq!(quote_out(native(), vnrg(), UNIT), None);
+    });
+}
+
+#[test]
+fn quotes_answer_through_runtimes_view_functions() {
+    use crate::{QuoteExactTokensForTokensViewFunction, QuoteTokensForExactTokensViewFunction};
+    use frame_support::view_functions::ViewFunction;
+    use parity_scale_codec::{Decode, Encode};
+    new_runtime_like_ext().execute_with(|| {
+        quote_world();
+        let call = QuoteExactTokensForTokensViewFunction::<Test>::new(native(), launch(), UNIT);
+        let out = Test::execute_view_function(
+            QuoteExactTokensForTokensViewFunction::<Test>::id(),
+            call.encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            Option::<u128>::decode(&mut &out[..]).unwrap(),
+            quote_in(native(), launch(), UNIT)
+        );
+
+        let call = QuoteTokensForExactTokensViewFunction::<Test>::new(launch(), native(), UNIT);
+        let out = Test::execute_view_function(
+            QuoteTokensForExactTokensViewFunction::<Test>::id(),
+            call.encode(),
+        )
+        .unwrap();
+        assert_eq!(
+            Option::<u128>::decode(&mut &out[..]).unwrap(),
+            quote_out(launch(), native(), UNIT)
+        );
+    });
+}
+
+#[test]
+fn pool_manager_creates_and_funds_pools_for_other_pallets() {
+    type Dex = VitreusDex;
+    new_runtime_like_ext().execute_with(|| {
+        assert!(!<Dex as PoolManager<_, _, _, _>>::pool_exists(usdc(), native()));
+        assert_ok!(<Dex as PoolManager<_, _, _, _>>::create_pool(native(), usdc(), 10));
+        // A record is a pool for every caller, before and after its first deposit.
+        assert!(<Dex as PoolManager<_, _, _, _>>::pool_exists(usdc(), native()));
+        assert_eq!(<Dex as PoolManager<_, _, _, _>>::fee_bps(usdc()), Some(100));
+        assert_eq!(<Dex as PoolManager<_, _, _, _>>::native_reserves(usdc()), None);
+        assert_noop!(
+            <Dex as PoolManager<_, _, _, _>>::create_pool(native(), launch(), 3),
+            Error::<Test>::ReservedAsset
+        );
+        // Amounts in the caller's order: USDC first.
+        let lp = <Dex as PoolManager<_, _, _, _>>::add_liquidity_for(
+            &BOB,
+            usdc(),
+            native(),
+            900 * UNIT,
+            100 * UNIT,
+            900 * UNIT,
+            100 * UNIT,
+        )
+        .unwrap();
+        assert_eq!(lp, lp_of(native(), usdc(), BOB));
+        assert_eq!(
+            <Dex as PoolManager<_, _, _, _>>::native_reserves(usdc()),
+            Some((100 * UNIT, 900 * UNIT))
+        );
+    });
+}
+
+#[test]
+fn intent_swap_can_spend_whole_token_balance() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        add(ALICE, native(), usdc(), 500_000 * UNIT, 500_000 * UNIT);
+        let all = balance(usdc(), CHARLIE);
+        let quoted = quote_in(usdc(), native(), all).unwrap();
+        assert_eq!(
+            VitreusDex::swap_exact_for_intent(&CHARLIE, usdc(), native(), all, 1),
+            Ok(quoted)
+        );
+        assert_eq!(balance(usdc(), CHARLIE), 0);
+    });
+}
