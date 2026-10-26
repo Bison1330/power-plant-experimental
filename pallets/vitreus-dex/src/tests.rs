@@ -2403,3 +2403,188 @@ fn seeder_holding_only_its_ed_and_quote_seeds_all_of_it() {
         assert_eq!(Balances::free_balance(ESCROW), ed);
     });
 }
+
+/// v4 storage as testnet and the dev chain hold it, written raw: a pool, a
+/// position, its total, its last swap and its creator fees, the
+/// marketplace's items, and the settings that carry over.
+fn write_v4_storage() -> (NativeOrAssetId, NativeOrAssetId) {
+    use crate::migrations::{v5, v7::OldPoolInfo};
+    use frame_support::{
+        storage::{storage_prefix, unhashed},
+        traits::StorageVersion,
+        Blake2_128Concat, StorageHasher,
+    };
+    use parity_scale_codec::Encode;
+    let pair = VitreusDex::canonical_pair(native(), usdc());
+    let key =
+        |item: &str, k: &[u8]| [&storage_prefix(b"VitreusDex", item.as_bytes())[..], k].concat();
+    let pair_key = Blake2_128Concat::hash(&pair.encode());
+    let old_account = acc(55);
+    unhashed::put(
+        &key("Pools", &pair_key),
+        &OldPoolInfo::<u128, AccountId> {
+            reserve_a: 1_000,
+            reserve_b: 2_000,
+            fee_tier: 3,
+            total_fees_collected: 7,
+            pool_account: old_account,
+            routing: crate::FeeRouting { protocol_bps: 5, creator_bps: 5, treasury_bps: 0 },
+        },
+    );
+    unhashed::put(
+        &key(
+            "LiquidityPositions",
+            &[&Blake2_128Concat::hash(&ALICE.encode())[..], &pair_key[..]].concat(),
+        ),
+        &(1_414u128, 1u64, Option::<u64>::None),
+    );
+    unhashed::put(&key("TotalLiquidity", &pair_key), &2_414u128);
+    unhashed::put(&key("LastSwapBlock", &pair_key), &9u64);
+    unhashed::put(&key("CreatorFeesUnclaimed", &pair_key), &3u128);
+    for item in v5::ITEMS {
+        unhashed::put_raw(&key(item, &[7u8; 16]), &[1]);
+    }
+    assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 5, 5, 0));
+    assert_ok!(VitreusDex::set_protocol_fee_recipient(RuntimeOrigin::root(), Some(DAVE)));
+    crate::ProtocolFeesUnclaimed::<Test>::put(500);
+    assert_ok!(Balances::force_set_balance(
+        RuntimeOrigin::root(),
+        VitreusDex::fee_escrow_account(),
+        500
+    ));
+    StorageVersion::new(4).put::<VitreusDex>();
+    pair
+}
+
+frame_support::parameter_types! {
+    pub const V7Source: AccountId = CHARLIE;
+}
+
+#[test]
+fn migration_v7_clears_single_pool_core_and_keeps_settings() {
+    use crate::migrations::{v5, v7};
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+
+    new_test_ext().execute_with(|| {
+        let pair = write_v4_storage();
+        // An ED above what the escrow holds besides the fees it owes.
+        ExistentialDeposit::set(1_000);
+        assert_eq!(v7::counts::<Test>(), vec![1, 1, 1, 1]);
+        assert!(v5::any_left::<Test>());
+        let issuance = Balances::total_issuance();
+        let source = Balances::free_balance(CHARLIE);
+
+        v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+
+        // Cleared, the marketplace's items included.
+        assert_eq!(v7::counts::<Test>(), vec![0, 0, 0, 0]);
+        assert!(!v5::any_left::<Test>());
+        assert!(Pools::<Test>::get(&pair).is_none());
+        // Kept with the settings: the fees owed. A creator claims under the same key.
+        assert_eq!(crate::CreatorFeesUnclaimed::<Test>::get(&pair), 3);
+        // Kept.
+        assert_eq!(
+            crate::DefaultFeeRouting::<Test>::get(3),
+            Some(crate::FeeRouting { protocol_bps: 5, creator_bps: 5, treasury_bps: 0 })
+        );
+        assert_eq!(crate::ProtocolFeeRecipient::<Test>::get(), Some(DAVE));
+        assert_eq!(crate::ProtocolFeesUnclaimed::<Test>::get(), 500);
+        // The fee escrow's ED, from the source, nothing minted.
+        // ED above the fees owed (500 + 3).
+        assert_eq!(Balances::free_balance(VitreusDex::fee_escrow_account()), 1_503);
+        assert_eq!(Balances::free_balance(CHARLIE), source - 1_003);
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(7));
+        assert_ok!(VitreusDex::do_try_state());
+
+        // Gated: a second run does nothing.
+        crate::ProtocolFeesUnclaimed::<Test>::put(501);
+        v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+        assert_eq!(crate::ProtocolFeesUnclaimed::<Test>::get(), 501);
+
+        // And the core works on the cleared chain: the pair can be created again.
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        assert_ok!(VitreusDex::add_liquidity(
+            RuntimeOrigin::signed(ALICE),
+            native(),
+            usdc(),
+            100_000,
+            100_000,
+            0,
+            0
+        ));
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn migration_v7_passes_its_own_try_runtime_checks() {
+    use frame_support::traits::OnRuntimeUpgrade;
+    new_test_ext().execute_with(|| {
+        write_v4_storage();
+        ExistentialDeposit::set(1_000);
+        assert_ok!(crate::migrations::v7::MigrateToV7::<Test, V7Source>::try_on_runtime_upgrade(
+            true
+        ));
+    });
+}
+
+#[test]
+fn migration_v7_runs_only_on_v4_chain() {
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+    new_test_ext().execute_with(|| {
+        let pair = write_v4_storage();
+        StorageVersion::new(6).put::<VitreusDex>();
+        crate::migrations::v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+        assert_eq!(crate::migrations::v7::counts::<Test>(), vec![1, 1, 1, 1], "untouched");
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
+        let _ = pair;
+    });
+}
+
+/// Testnet's whole `VitreusDex` storage at block 13_408_262 (spec 215),
+/// exported raw: tier 3's default split, and storage version 4. No pool,
+/// position or fee; its fee escrow held nothing.
+const TESTNET_DEX_STORAGE: [(&str, &str); 2] = [
+    (
+        "ce14eba2a7fea92eb5298d5a9e3cf30a0155e5add1f2cc8b1e913cc30b281729bfb27f1eaef06bb903000000",
+        "050005000a00",
+    ),
+    ("ce14eba2a7fea92eb5298d5a9e3cf30a4e7b9012096b41c4eb3aaf947f6ea429", "0400"),
+];
+
+#[test]
+fn migration_v7_on_testnets_own_storage() {
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+    frame_support::parameter_types! {
+        pub const Treasury: AccountId = DAVE;
+    }
+    new_runtime_like_ext_before_upgrade().execute_with(|| {
+        for (k, v) in TESTNET_DEX_STORAGE {
+            frame_support::storage::unhashed::put_raw(
+                &sp_core::bytes::from_hex(k).unwrap(),
+                &sp_core::bytes::from_hex(v).unwrap(),
+            );
+        }
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(4));
+        let escrow = VitreusDex::fee_escrow_account();
+        assert_eq!(Balances::free_balance(escrow), 0);
+        let issuance = Balances::total_issuance();
+
+        #[cfg(feature = "try-runtime")]
+        assert_ok!(crate::migrations::v7::MigrateToV7::<Test, Treasury>::try_on_runtime_upgrade(
+            true
+        ));
+        #[cfg(not(feature = "try-runtime"))]
+        crate::migrations::v7::MigrateToV7::<Test, Treasury>::on_runtime_upgrade();
+
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(7));
+        assert_eq!(
+            crate::DefaultFeeRouting::<Test>::get(3),
+            Some(crate::FeeRouting { protocol_bps: 5, creator_bps: 5, treasury_bps: 10 })
+        );
+        assert_eq!(Balances::free_balance(escrow), RUNTIME_ED);
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert_ok!(VitreusDex::do_try_state());
+    });
+}

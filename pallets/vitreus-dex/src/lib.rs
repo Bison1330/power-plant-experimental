@@ -446,12 +446,10 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
 
-    /// The pool storage this version reads is not the storage v6 left:
-    /// `Pools` holds records, the pools are in the base pallet, and
-    /// `LiquidityPositions` and `TotalLiquidity` are gone. The migration from
-    /// v4 to v7 that clears the old storage lands before any chain runs this;
-    /// it carries v5's step (`migrations::v5`) and the fee escrow's ED.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(6);
+    /// v7: the core on the base pallet. A chain at v4 reaches it through
+    /// `migrations::v7::MigrateToV7`, which clears the single-pool core's
+    /// storage and carries v5's and v6's steps.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(7);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -2229,6 +2227,182 @@ pub mod migrations {
         weights::Weight,
     };
     use sp_std::marker::PhantomData;
+
+    /// v4 → v7: the DEX core moves onto the base pallet. The single-pool
+    /// core's storage is cleared, not converted: no chain the upgrade
+    /// reaches has a pool to carry over (testnet has none; the dev chain
+    /// starts from a new genesis), and a pool that did exist would lose its
+    /// record while its pool account kept the funds, with no call left that
+    /// moves them — which is why testnet must not create a pool or graduate
+    /// a launch before this upgrade. What is dropped is logged, each pool
+    /// with its id and account.
+    ///
+    /// Also carried: v5's removal of the solver marketplace's items (a chain
+    /// at v4 never ran it; list this migration alone, not v5 as well), and
+    /// the fee escrow's ED from `Source`, which v6 gave it. Kept:
+    /// `DefaultFeeRouting`, `ProtocolFeeRecipient`, and the fees owed —
+    /// `ProtocolFeesUnclaimed` and `CreatorFeesUnclaimed`, whose native the
+    /// fee escrow holds and the new core pays out under the same keys.
+    pub mod v7 {
+        use super::*;
+        use frame_support::{
+            storage::{storage_prefix, unhashed},
+            traits::PalletInfoAccess,
+            Blake2_128Concat,
+        };
+
+        /// A pool record as the single-pool core stored it (v3 to v6).
+        #[derive(Encode, Decode)]
+        #[allow(missing_docs)]
+        pub struct OldPoolInfo<Balance, AccountId> {
+            pub reserve_a: Balance,
+            pub reserve_b: Balance,
+            pub fee_tier: u32,
+            pub total_fees_collected: Balance,
+            pub pool_account: AccountId,
+            pub routing: FeeRouting,
+        }
+
+        #[frame_support::storage_alias]
+        type OldPools<T: Config> = StorageMap<
+            Pallet<T>,
+            Blake2_128Concat,
+            (<T as Config>::AssetKind, <T as Config>::AssetKind),
+            OldPoolInfo<<T as Config>::Balance, <T as frame_system::Config>::AccountId>,
+        >;
+
+        /// The single-pool core's items this upgrade clears. `Pools` keeps
+        /// its name with the new record shape, so it is cleared too.
+        pub const CLEARED: [&str; 4] =
+            ["Pools", "LiquidityPositions", "TotalLiquidity", "LastSwapBlock"];
+
+        fn prefix<T: Config>(item: &str) -> [u8; 32] {
+            storage_prefix(Pallet::<T>::name().as_bytes(), item.as_bytes())
+        }
+
+        /// The routed fees the escrow owes: protocol and every creator's.
+        pub fn fees_owed<T: Config>() -> T::Balance {
+            CreatorFeesUnclaimed::<T>::iter_values()
+                .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f))
+        }
+
+        /// How many keys each of [`CLEARED`] holds.
+        pub fn counts<T: Config>() -> sp_std::vec::Vec<u32> {
+            CLEARED
+                .iter()
+                .map(|item| {
+                    let p = prefix::<T>(item);
+                    let mut n = 0u32;
+                    let mut key = p.to_vec();
+                    while let Some(next) = sp_io::storage::next_key(&key) {
+                        if !next.starts_with(&p) {
+                            break;
+                        }
+                        n = n.saturating_add(1);
+                        key = next;
+                    }
+                    n
+                })
+                .collect()
+        }
+
+        /// Unversioned body; wrap in [`MigrateToV7`]. `Source` pays the fee
+        /// escrow's ED where it holds less, as the runtime's Treasury.
+        pub struct VersionUncheckedMigrateToV7<T, Source>(PhantomData<(T, Source)>);
+
+        impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
+            for VersionUncheckedMigrateToV7<T, Source>
+        {
+            fn on_runtime_upgrade() -> Weight {
+                let (mut reads, mut writes) = (0u64, 0u64);
+                // Name every pool that is lost, before its record goes.
+                for (pair, pool) in OldPools::<T>::iter() {
+                    reads = reads.saturating_add(1);
+                    log::warn!(
+                        target: "runtime::vitreus-dex",
+                        "v7 migration: dropping pool {pair:?} (account {:?}, reserves {:?} / {:?}); its account keeps what it holds",
+                        pool.pool_account,
+                        pool.reserve_a,
+                        pool.reserve_b,
+                    );
+                }
+                for item in CLEARED {
+                    let r = unhashed::clear_prefix(&prefix::<T>(item), None, None);
+                    reads = reads.saturating_add(r.loops as u64);
+                    writes = writes.saturating_add(r.unique as u64);
+                    if r.unique > 0 {
+                        log::warn!(
+                            target: "runtime::vitreus-dex",
+                            "v7 migration: dropped {} key(s) of {item}",
+                            r.unique
+                        );
+                    }
+                }
+                let w = v5::VersionUncheckedMigrateToV5::<T>::on_runtime_upgrade();
+
+                // The fee escrow's ED above the fees it owes, paid by `Source`
+                // (nothing is minted).
+                let escrow = Pallet::<T>::fee_escrow_account();
+                let native = T::NativeAsset::get();
+                let short = Pallet::<T>::native_ed()
+                    .saturating_add(fees_owed::<T>())
+                    .saturating_sub(T::Assets::balance(native.clone(), &escrow));
+                if !short.is_zero() {
+                    match T::Assets::transfer(native, &Source::get(), &escrow, short, Preserve) {
+                        Ok(_) => writes = writes.saturating_add(2),
+                        Err(e) => log::error!(
+                            target: "runtime::vitreus-dex",
+                            "v7 migration: the fee escrow's ED could not be paid ({e:?}); routed slices below it go to the pool until it holds one"
+                        ),
+                    }
+                }
+                T::DbWeight::get()
+                    .reads_writes(reads.saturating_add(2), writes)
+                    .saturating_add(w)
+            }
+
+            /// Records what the upgrade drops; never fails, so a chain
+            /// holding pools still passes try-runtime and its log shows them.
+            #[cfg(feature = "try-runtime")]
+            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+                let counts = counts::<T>();
+                for (item, n) in CLEARED.iter().zip(counts.iter()) {
+                    if *n > 0 {
+                        log::warn!(
+                            target: "runtime::vitreus-dex",
+                            "v7 pre_upgrade: {item} holds {n} key(s); the upgrade drops them"
+                        );
+                    }
+                }
+                Ok(counts.encode())
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn post_upgrade(_: sp_std::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+                frame_support::ensure!(
+                    counts::<T>().iter().all(|n| *n == 0),
+                    "the single-pool core's storage is cleared"
+                );
+                frame_support::ensure!(!v5::any_left::<T>(), "no marketplace key is left");
+                let escrow = Pallet::<T>::fee_escrow_account();
+                frame_support::ensure!(
+                    T::Assets::balance(T::NativeAsset::get(), &escrow)
+                        >= Pallet::<T>::native_ed().saturating_add(fees_owed::<T>()),
+                    "the fee escrow holds its ED and the fees it owes"
+                );
+                Ok(())
+            }
+        }
+
+        /// v4 → v7, gated on the pallet's on-chain storage version.
+        pub type MigrateToV7<T, Source> = VersionedMigration<
+            4,
+            7,
+            VersionUncheckedMigrateToV7<T, Source>,
+            Pallet<T>,
+            <T as frame_system::Config>::DbWeight,
+        >;
+    }
 
     /// v5: the solver marketplace's storage leaves with it.
     pub mod v5 {

@@ -255,6 +255,27 @@ weights to reach a live chain (weights are compiled into the runtime), and
 `runtime/vitreus/src/weights/`) is a separate exercise on the same hardware
 if those were never measured either.
 
+## The DEX's benchmarks on the base pallet
+
+Since the DEX moved onto pallet-asset-conversion its extrinsics run the base
+pallet's code inside them, so its weights include the base pallet's work and
+are measured from this pallet's benchmarks alone; the base pallet's own
+calls are not in the runtime and need no weights of their own. Each
+benchmark sets up its costliest path:
+
+| Benchmark | Path measured |
+|---|---|
+| `create_pool` | the record only (the base pool comes with the first deposit) |
+| `add_liquidity` | the first deposit: the base pool created with its LP token, the pool account's account of a non-sufficient asset opened on a deposit, the provider's LP account opened |
+| `remove_liquidity` | a remove that first lifts an expired lock (thaw, record dropped) |
+| `swap_exact_tokens_for_tokens` | native in, protocol and creator slices to the escrow, the output a non-sufficient asset bought into an account whose consumer references are used up (opened on a deposit) |
+| `lock_liquidity` | a new lock, freezing the whole position |
+
+Graduation (the launchpad's `graduate` and `buy_crossing`) measures the seed
+with a full pre-seed sweep, the base pool's creation, the first deposit and
+both freezes. The DEX's and the launchpad's weights are placeholders until
+this pass runs, which needs a runtime that wires these pallets on 2512.
+
 ## Not reproduced: a 0.1 VTRS gap in a launchpad benchmark's seed check
 
 Once, while the launchpad's benchmarks were being ported to the base pool,
