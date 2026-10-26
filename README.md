@@ -66,6 +66,7 @@ its lock, move this one to the same commit.
 ```bash
 cargo test --workspace --locked
 cargo check --workspace --locked --features runtime-benchmarks
+cargo test --workspace --locked --features runtime-benchmarks   # the mocks and benchmark tests with the feature on
 cargo fmt --all -- --check
 PROPTEST_CASES=5000 cargo test --release -p pallet-launch-treasury --lib fuzz   # the property harness; 32 cases in plain `cargo test`
 ```

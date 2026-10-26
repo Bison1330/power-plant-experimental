@@ -42,10 +42,14 @@ jobs:
       - name: Benchmarks compile
         run: cargo check --workspace --locked --features runtime-benchmarks
 
-      # The step above only compiles benchmarks. This runs the vendored
-      # pallet's benchmark tests, which no other step does.
-      - name: Vendored pallet benchmark tests
-        run: cargo test -p pallet-asset-conversion --locked --features runtime-benchmarks
+      # The step above only compiles benchmarks, and not the mocks or tests
+      # that build with the feature on. This runs every crate's tests with it,
+      # the vendored pallet's benchmark tests included: run alone, a crate
+      # does not see the features other crates turn on in shared
+      # dependencies, which is how the launchpad and launch-treasury mocks
+      # stopped compiling under it unseen.
+      - name: Test with benchmarks
+        run: cargo test --workspace --locked --features runtime-benchmarks
 
       # rustfmt.toml is power-plant's; the pinned toolchain's rustfmt and
       # power-plant's nightly check agree on every file here.
