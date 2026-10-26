@@ -877,26 +877,26 @@ fn fm06_no_creator_lp_and_position_is_permanent() {
 // FM-08 — crossing buy, partial fill, deferred seed
 // =======================================================================
 
-/// Make the next seed fail: drain the DEX excess recipient so a pre-seed token
-/// donation at the pool address cannot be delivered (ExcessRecipientCannotReceive).
-/// Make the seed fail: the pre-seed sweep of a native donation that leaves
-/// less than an ED to an excess recipient holding nothing. (A donation of
-/// the launch token is burned, so it cannot fail the seed.)
-fn arm_seed_failure(id: LaunchId, donor: impl Borrow<Acc>) {
-    let donor = donor.borrow();
-    // The pool account keeps the first ED as its own; the half ED above it
-    // is what the sweep cannot deliver.
-    assert_ok!(Balances::transfer_allow_death(origin(donor), pool_account(id), ED + ED / 2));
-    assert_ok!(Assets::transfer(
-        origin(donor),
-        asset_of(id).into(),
-        pool_account(id),
-        1_000 * UNIT
-    ));
-    assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), EXCESS, 0));
+/// Make the next seed of launch `id` fail, as a chain can: governance has
+/// not configured a fee split for the launch's pool tier, so the seed
+/// is refused rather than graduating a pool that routes nothing to its
+/// treasury. The launch defers its graduation; `disarm_seed_failure` is
+/// governance setting the tier, after which anyone can retry.
+fn arm_seed_failure(id: LaunchId) {
+    pallet_vitreus_dex::DefaultFeeRouting::<Test>::remove(launch(id).curve.pool_fee_tier);
 }
-fn disarm_seed_failure() {
-    assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), EXCESS, ED));
+fn disarm_seed_failure(id: LaunchId) {
+    assert_ok!(VitreusDex::set_default_fee_routing(
+        RuntimeOrigin::root(),
+        launch(id).curve.pool_fee_tier,
+        0,
+        0,
+        0
+    ));
+}
+/// The error a seed armed to fail defers with.
+fn armed_error() -> DispatchError {
+    dex_err(pallet_vitreus_dex::Error::<Test>::NoDefaultFeeRouting)
 }
 
 #[test]
@@ -925,7 +925,7 @@ fn fm08_crossing_buy_partial_fill_and_deferred_seed() {
             "remaining {remaining}"
         );
 
-        arm_seed_failure(id, BOB);
+        arm_seed_failure(id);
         let quote = Launchpad::quote_buy(id, 3 * q_to_leave_1m).unwrap();
         assert!(quote.crossed);
         let before = vtrs(DAVE);
@@ -942,27 +942,20 @@ fn fm08_crossing_buy_partial_fill_and_deferred_seed() {
         assert_eq!(s.phase, Phase::Complete);
         assert_eq!(s.tokens_remaining, 0);
         assert!(s.real_quote > 0);
-        assert_eq!(
-            deferred_error(),
-            Some(dex_err(pallet_vitreus_dex::Error::<Test>::ExcessRecipientCannotReceive))
-        );
+        assert_eq!(deferred_error(), Some(armed_error()));
         assert!(!VitreusDex::pool_exists(native(), kind(id)));
         assert_noop!(Launchpad::sell(origin(DAVE), id, 1, 0), Error::<Test>::WrongPhase);
         assert_noop!(Launchpad::buy(origin(DAVE), id, UNIT, 0), Error::<Test>::WrongPhase);
-        assert_noop!(
-            Launchpad::graduate(origin(CHARLIE), id),
-            dex_err(pallet_vitreus_dex::Error::<Test>::ExcessRecipientCannotReceive)
-        );
+        assert_noop!(Launchpad::graduate(origin(CHARLIE), id), armed_error());
 
         // unforce → anyone graduates; the pool holds exactly the stored amounts
-        disarm_seed_failure();
+        disarm_seed_failure(id);
         let raised = state(id).real_quote;
         assert_ok!(Launchpad::graduate(origin(CHARLIE), id));
         assert_eq!(state(id).phase, Phase::Graduated);
         let pool = pool_of(id);
         assert_eq!((pool.reserve_a, pool.reserve_b), (raised, SEEDED_TOKENS));
-        // (above the pool account's own ED, which is not a reserve)
-        assert_eq!(vtrs(pool_account(id)), raised + ED);
+        assert_eq!(vtrs(pool_account(id)), raised);
         assert_eq!(tok(id, pool_account(id)), SEEDED_TOKENS);
     });
 }
@@ -1359,18 +1352,16 @@ fn fm11_every_complete_state_has_a_forward_path() {
         assert_eq!(state(id).phase, Phase::Graduated);
         assert_eq!(pool_of(id).reserve_b, SEEDED_TOKENS);
     });
-    // (c) excess recipient cannot receive → deferred, fixed, permissionless retry
+    // (c) the seed is refused (no fee split for the tier) → deferred, fixed,
+    // permissionless retry
     new_test_ext().execute_with(|| {
         let id = create(ALICE);
         buy(BOB, id, 10 * UNIT);
-        arm_seed_failure(id, BOB);
+        arm_seed_failure(id);
         cross(CHARLIE, id);
         assert_eq!(state(id).phase, Phase::Complete);
-        assert_noop!(
-            Launchpad::graduate(origin(DAVE), id),
-            dex_err(pallet_vitreus_dex::Error::<Test>::ExcessRecipientCannotReceive)
-        );
-        disarm_seed_failure();
+        assert_noop!(Launchpad::graduate(origin(DAVE), id), armed_error());
+        disarm_seed_failure(id);
         assert_ok!(Launchpad::graduate(origin(DAVE), id));
         assert_eq!(state(id).phase, Phase::Graduated);
     });

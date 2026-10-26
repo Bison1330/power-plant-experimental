@@ -1184,26 +1184,23 @@ fn lock_can_be_extended_but_never_shortened() {
 }
 
 #[test]
-fn seed_burns_reserved_asset_donation_and_fails_loudly_when_quote_sweep_cannot_land() {
+fn seed_burns_reserved_asset_donation_whatever_recipient_can_hold() {
     // The reserved asset is burned whatever the recipient can hold: a sweep
     // of it needs a free consumer reference there, which anyone can use up.
-    // The quote is still swept, and a recipient that cannot take it fails
-    // the seed loudly, so a mis-wired `ExcessRecipient` cannot pass as
-    // correct operation.
+    // The quote is swept. (A quote sweep that cannot land, which fails the
+    // seed loudly, needs a non-native quote now that the pool keeps nothing
+    // of its own: core_tests::seed_whose_sweep_cannot_land_fails_loudly.)
     new_test_ext().execute_with(|| {
         setup_reserved_asset();
         let key = VitreusDex::canonical_pair(native(), launch());
         let pool_account = pool_acc(native(), launch());
-        // An ED above one unit, so a sweep can be below it.
         ExistentialDeposit::set(1_000);
         let ed = ExistentialDeposit::get();
-        // TREASURY has no native balance, so it cannot open an account for the
-        // non-sufficient launch asset, nor take less than an ED of native.
+        // TREASURY, the excess recipient, has no native balance, so it cannot
+        // open an account for the non-sufficient launch asset.
         assert_eq!(Balances::free_balance(TREASURY), 0);
         // A donor has to give the pool account a provider before it can hold
-        // the non-sufficient token, so native goes in first (as an attacker
-        // would): the pool account's ED and one unit more, which is what the
-        // seed has to sweep.
+        // the non-sufficient token, so native goes in first.
         let donated_native = ed + 1;
         let donated_token = 3 * SEED_TOKEN;
         assert_ok!(Balances::transfer_allow_death(
@@ -1218,37 +1215,23 @@ fn seed_burns_reserved_asset_donation_and_fails_loudly_when_quote_sweep_cannot_l
             donated_token
         ));
         let issuance_before = Assets::total_supply(LAUNCH_ID);
-        let escrow_native_before = Balances::free_balance(ESCROW);
-        let escrow_token_before = Assets::balance(LAUNCH_ID, ESCROW);
 
-        // D10: set the tier's default here, not inside `seed`, so the
-        // `assert_noop!` below sees no storage write of its own.
-        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 0, 0, 0));
-        // Open: the base pool keeps nothing of its own, so the sweep takes
-        // the whole native donation, at least an ED, which an empty recipient
-        // can take; this seed no longer fails. See ci/expected-red.
-        assert_noop!(seed(ESCROW), Error::<Test>::ExcessRecipientCannotReceive);
-
-        // No pool, no position, nothing burned, nothing moved.
-        assert!(Pools::<Test>::get(key.clone()).is_none());
-        assert_eq!(total(&key), 0);
-        assert_eq!(super::tests::shares(ESCROW, &key), 0);
-        assert_eq!(Assets::total_supply(LAUNCH_ID), issuance_before);
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), donated_token);
-        assert_eq!(Balances::free_balance(pool_account), donated_native);
-        assert_eq!(Balances::free_balance(TREASURY), 0);
-        assert_eq!(Balances::free_balance(ESCROW), escrow_native_before);
-        assert_eq!(Assets::balance(LAUNCH_ID, ESCROW), escrow_token_before);
-
-        // FM-11 recovery: fix the recipient (give it a provider) and retry —
-        // permissionlessly, with no other state change needed.
-        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), TREASURY, UNIT));
         assert_ok!(seed(ESCROW));
+
+        // The token donation was burned, not delivered; the native one swept.
         assert_eq!(Assets::balance(LAUNCH_ID, TREASURY), 0);
         assert_eq!(Assets::total_supply(LAUNCH_ID), issuance_before - donated_token);
-        assert_eq!(Balances::free_balance(TREASURY), UNIT + donated_native);
-        assert_eq!(Assets::balance(LAUNCH_ID, pool_account), SEED_TOKEN);
-        assert_eq!(Balances::free_balance(pool_account), SEED_NATIVE);
+        assert_eq!(Balances::free_balance(TREASURY), donated_native);
+        System::assert_has_event(
+            Event::PreSeedBalanceBurned {
+                pool: key.clone(),
+                asset: launch(),
+                amount: donated_token,
+            }
+            .into(),
+        );
+        // The pool holds the seed and nothing donated.
+        assert_eq!(reserves(&key), (SEED_NATIVE, SEED_TOKEN));
     });
 }
 
