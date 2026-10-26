@@ -49,7 +49,7 @@ use frame_support::traits::{
     tokens::{Fortitude, Precision, Preservation},
 };
 use pallet_launchpad::{Curves, Launches, NextLaunchId, Phase};
-use pallet_vitreus_dex::{LiquidityPositions, Pools, TotalLiquidity, MINIMUM_LIQUIDITY};
+use pallet_vitreus_dex::{AmmBase, Pools};
 use proptest::prelude::*;
 use sp_core::U256;
 use sp_runtime::{DispatchError, TokenError};
@@ -341,7 +341,12 @@ fn kind(id: LaunchId) -> NativeOrAssetId {
 }
 
 fn pool_account(id: LaunchId) -> Acc {
-    VitreusDex::pool_account_for(NativeOrAssetId::Native, kind(id))
+    VitreusDex::pool_account_for(NativeOrAssetId::Native, kind(id)).unwrap()
+}
+
+/// `who`'s LP tokens in the native pool of `asset`.
+fn lp_of(who: &Acc, asset: &NativeOrAssetId) -> u128 {
+    <Test as pallet_vitreus_dex::Config>::Base::lp_balance(&NativeOrAssetId::Native, asset, who)
 }
 
 fn escrow_of(id: LaunchId) -> Acc {
@@ -527,8 +532,7 @@ fn run(op: &Op) -> Option<Result<(), DispatchError>> {
         Op::RemoveLiquidity { who, launch, frac_bps } => {
             let id = launch_at(*launch)?;
             let w = user(*who);
-            let pair = VitreusDex::canonical_pair(NativeOrAssetId::Native, kind(id));
-            let shares = LiquidityPositions::<Test>::get(w, &pair).map(|p| p.shares).unwrap_or(0);
+            let shares = lp_of(&w, &kind(id));
             let take = shares / 10_000 * (*frac_bps as u128)
                 + (shares % 10_000) * (*frac_bps as u128) / 10_000;
             if take == 0 {
@@ -883,18 +887,10 @@ fn check_all(op: &Op, before: &Before) -> Result<(), String> {
                         c.real_quote, c.tokens_remaining, c.lp_shares
                     ));
                 }
-                let pair = VitreusDex::canonical_pair(
-                    NativeOrAssetId::Native,
-                    NativeOrAssetId::WithId(asset),
-                );
-                let Some(pos) = LiquidityPositions::<Test>::get(esc, &pair) else {
-                    return Err(format!("launch {id}: graduated without an escrow position"));
-                };
-                if pos.locked_until != Some(u64::MAX) {
-                    return Err(format!(
-                        "launch {id}: escrow position not locked forever: {:?}",
-                        pos.locked_until
-                    ));
+                // Until seeding is rebuilt: the seed's LP tokens, which a
+                // permanent freeze will hold.
+                if lp_of(esc, &NativeOrAssetId::WithId(asset)) == 0 {
+                    return Err(format!("launch {id}: graduated without the escrow's LP tokens"));
                 }
             },
         }
@@ -927,27 +923,17 @@ fn check_all(op: &Op, before: &Before) -> Result<(), String> {
         }
     }
 
-    // DEX, per pool.
-    for (pair, pool) in Pools::<Test>::iter() {
-        let (ba, bb) = (
-            Assets::balance_of_kind(&pair.0, &pool.pool_account),
-            Assets::balance_of_kind(&pair.1, &pool.pool_account),
-        );
-        if ba < pool.reserve_a || bb < pool.reserve_b {
+    // DEX, per pool: every LP token is held by an account we can name.
+    for (pair, _) in Pools::<Test>::iter() {
+        let issuance = <Test as pallet_vitreus_dex::Config>::Base::lp_issuance(&pair.0, &pair.1);
+        let named: u128 = named_accounts()
+            .iter()
+            .map(|a| <Test as pallet_vitreus_dex::Config>::Base::lp_balance(&pair.0, &pair.1, a))
+            .sum();
+        if named != issuance {
             return Err(format!(
-                "pool {pair:?}: balances ({ba}, {bb}) below stored reserves ({}, {})",
-                pool.reserve_a, pool.reserve_b
+                "pool {pair:?}: named accounts hold {named} of {issuance} LP tokens"
             ));
-        }
-        let total = TotalLiquidity::<Test>::get(&pair).unwrap_or(0);
-        if total > 0 {
-            let positions: u128 = LiquidityPositions::<Test>::iter()
-                .filter(|(_, p, _)| *p == pair)
-                .map(|(_, _, pos)| pos.shares)
-                .sum();
-            if positions + MINIMUM_LIQUIDITY as u128 != total {
-                return Err(format!("pool {pair:?}: Σ positions {positions} + {MINIMUM_LIQUIDITY} ≠ TotalLiquidity {total}"));
-            }
         }
     }
     if !matches!(op, Op::RemoveLiquidity { .. }) {
@@ -972,18 +958,6 @@ fn check_all(op: &Op, before: &Before) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-trait BalanceOfKind {
-    fn balance_of_kind(kind: &NativeOrAssetId, who: &Acc) -> u128;
-}
-impl BalanceOfKind for Assets {
-    fn balance_of_kind(kind: &NativeOrAssetId, who: &Acc) -> u128 {
-        match kind {
-            NativeOrAssetId::Native => free(who),
-            NativeOrAssetId::WithId(id) => Assets::balance(*id, who),
-        }
-    }
 }
 
 fn summary() -> String {

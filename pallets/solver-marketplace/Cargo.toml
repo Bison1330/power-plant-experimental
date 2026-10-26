@@ -21,6 +21,8 @@ sp-runtime = { workspace = true, default-features = false }
 pallet-vitreus-dex = { workspace = true, default-features = false }
 
 [dev-dependencies]
+pallet-asset-conversion = { workspace = true, features = ["std"] }
+pallet-assets-freezer = { workspace = true, features = ["std"] }
 proptest = "=1.5.0"
 pallet-balances = { workspace = true, features = ["std"] }
 pallet-assets = { workspace = true, features = ["std"] }

@@ -17,7 +17,7 @@ fn kind(id: LaunchId) -> NativeOrAssetId {
     NativeOrAssetId::WithId(asset_of(id))
 }
 fn pool_account(id: LaunchId) -> Acc {
-    VitreusDex::pool_account_for(native(), kind(id))
+    VitreusDex::pool_account_for(native(), kind(id)).unwrap()
 }
 fn origin(who: impl Borrow<Acc>) -> RuntimeOrigin {
     RuntimeOrigin::signed(who.borrow().clone())

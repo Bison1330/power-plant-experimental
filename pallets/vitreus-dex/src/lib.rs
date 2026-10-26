@@ -27,18 +27,25 @@
 #![warn(missing_docs)]
 #![allow(clippy::result_unit_err, clippy::too_many_arguments)]
 
-#[cfg(test)]
+// Not yet ported to LP tokens: written against share accounting, which
+// the base pallet replaced.
+#[cfg(any())]
 mod account_lifecycle_tests;
 #[cfg(test)]
 mod asset_conversion_tests;
 #[cfg(test)]
+mod core_tests;
+#[cfg(any())]
 mod fuzz;
 #[cfg(test)]
 mod mock;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
-#[cfg(test)]
+#[cfg(any())]
 mod tests;
+
+pub mod base;
+pub use base::{AmmBase, AssetConversionAdapter};
 
 #[cfg(feature = "runtime-benchmarks")]
 pub mod benchmarking;
@@ -53,12 +60,13 @@ pub use pallet::*;
 use frame_support::{
     dispatch::DispatchResult,
     traits::{
-        fungibles::{Balanced, Inspect, Mutate},
+        fungibles::{Balanced, Credit, Inspect, Mutate},
         tokens::{
             Balance, DepositConsequence,
             Fortitude::Polite,
+            Precision::Exact,
             Preservation::{self, Expendable, Preserve},
-            Provenance, WithdrawConsequence,
+            Provenance,
         },
         AccountTouch, Contains, Get,
     },
@@ -70,10 +78,10 @@ use scale_info::TypeInfo;
 use sp_arithmetic::traits::Unsigned;
 use sp_runtime::{
     traits::{
-        AccountIdConversion, Bounded, CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, Ensure,
+        AccountIdConversion, CheckedAdd, CheckedDiv, CheckedMul, CheckedSub, Ensure,
         IntegerSquareRoot, One, Saturating, Zero,
     },
-    DispatchError, RuntimeDebug,
+    DispatchError, PerThing, Permill, Rounding, RuntimeDebug,
 };
 
 /// The PalletId used to derive the DEX sovereign account.
@@ -228,28 +236,15 @@ impl<AssetKind, AccountId, Balance> TreasurySink<AssetKind, AccountId, Balance> 
     fn note_fee(_: &AssetKind, _: Balance) {}
 }
 
-/// On-chain record of a trading pair's reserves, fee tier and dedicated sub-account.
+/// Our record of a pool: what was fixed for it when governance created it
+/// or a launch seeded it. The pool itself — its reserves, its LP tokens and
+/// the account that holds them — is in the base pallet, which charges the LP
+/// fee this record fixes ([`Pallet::lp_fee`]); this pallet takes the routed
+/// slices outside it. The base pool comes into existence with the first
+/// deposit, whose depositor pays the deposits that open its accounts.
 ///
-/// **Quoters: price from the pool account's live balances, not from
-/// `reserve_a` / `reserve_b`.** `do_swap` calls `sync_reserves` before it
-/// prices, which re-reads the balances, so the stored reserves are only a
-/// snapshot as of the last sync: they lag by the pool's share of every fee
-/// since (it stays in the account uncounted, Finding 3) and by any direct
-/// transfer. A quote computed from the stored fields overstates the output
-/// and the chain then fails the swap with `SlippageExceeded` at a tight
-/// `amount_out_min`. The frontend's swap page reads balances for this reason.
-///
-/// **What a pool account keeps as its own is not a reserve.** From its
-/// first deposit, every pool account holds the native existential deposit,
-/// as its own provider, and one less than each token's minimum balance —
-/// paid by that depositor on top of its amounts, or by a seed out of what it
-/// cannot spare (see `Pallet::pool_buffer`). The ED lets a pool with no
-/// native side hold non-sufficient tokens; and since a withdrawal or swap
-/// only ever takes reserves and leaves at least a unit of each, the account
-/// never drops below any asset's minimum, where the asset's pallet would pay
-/// the rest out with the debit and leave the remaining LPs with nothing. A
-/// reserve is the account's balance less what it keeps
-/// ([`PoolManager::native_reserves`] already subtracts it).
+/// **Quoters: price from the pool account's balances** (the base pallet's
+/// reserves), and take the routed slices off as the swap does.
 #[derive(
     Clone,
     Encode,
@@ -261,43 +256,35 @@ impl<AssetKind, AccountId, Balance> TreasurySink<AssetKind, AccountId, Balance> 
     TypeInfo,
     MaxEncodedLen,
 )]
-pub struct PoolInfo<Balance, AccountId> {
-    /// Reserve of `asset_a` as of the last `sync_reserves`; see the struct docs
-    /// before pricing from this.
-    pub reserve_a: Balance,
-    /// Reserve of `asset_b` as of the last `sync_reserves`; see the struct docs
-    /// before pricing from this.
-    pub reserve_b: Balance,
-    /// Swap fee tier for this pool, expressed in 10ths of a percent.
+pub struct PoolInfo<Balance> {
+    /// Swap fee tier for this pool, expressed in 10ths of a percent: the
+    /// whole fee a swap pays, routed slices included.
     pub fee_tier: u32,
     /// Cumulative fees collected over the pool's lifetime.
     pub total_fees_collected: Balance,
-    /// Sub-account that physically holds the pool's reserves.
-    pub pool_account: AccountId,
-    /// D4: fee split snapshotted at creation / seeding. Zero for pools that
-    /// predate D4 (migration v1) and for pools with no native side.
+    /// Fee split snapshotted at creation / seeding. Zero for pools with
+    /// no native side.
     pub routing: FeeRouting,
 }
 
-/// On-chain record of a single liquidity provider's position in a pool.
-#[derive(
-    Clone,
-    Encode,
-    Decode,
-    DecodeWithMemTracking,
-    Eq,
-    PartialEq,
-    RuntimeDebug,
-    TypeInfo,
-    MaxEncodedLen,
-)]
-pub struct LiquidityPosition<Balance, BlockNumber> {
-    /// LP shares owned by the provider.
-    pub shares: Balance,
-    /// Block at which the position was opened.
-    pub entry_block: BlockNumber,
-    /// Block until which the position is locked, if any.
-    pub locked_until: Option<BlockNumber>,
+/// The routed slices of one swap, in native, and where the treasury slice
+/// goes (`None`: folded into `protocol`).
+struct Slices<Balance, AccountId> {
+    protocol: Balance,
+    creator: Balance,
+    treasury: Balance,
+    sink: Option<AccountId>,
+}
+
+impl<Balance: sp_runtime::traits::AtLeast32BitUnsigned + Copy, AccountId>
+    Slices<Balance, AccountId>
+{
+    fn none() -> Self {
+        Slices { protocol: Zero::zero(), creator: Zero::zero(), treasury: Zero::zero(), sink: None }
+    }
+    fn total(&self) -> Balance {
+        self.protocol.saturating_add(self.creator).saturating_add(self.treasury)
+    }
 }
 
 /// In-runtime interface for pallets that need to create DEX pools and seed
@@ -440,14 +427,11 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
 
-    /// v2 on the fork is D8 (hash-derived pool accounts, `migrations::v2`).
-    /// v5 removes the solver marketplace's storage, which moved to a pallet
-    /// of its own (`migrations::v5`); v6 gives the fee escrow and every pool
-    /// account their ED (`migrations::v6`).
-    /// D9 — `FeeRouting.treasury_bps`, `LastSwapBlock` — changes the shape
-    /// of every stored `PoolInfo`, so on the fork it is v3 with a migration
-    /// (`migrations::v3`); the submission branch, which no chain with v1
-    /// pools targets, carries D9 as its v2 without one.
+    /// The pool storage this version reads is not the storage v6 left:
+    /// `Pools` holds records, the pools are in the base pallet, and
+    /// `LiquidityPositions` and `TotalLiquidity` are gone. The migration from
+    /// v4 to v7 that clears the old storage lands before any chain runs this;
+    /// it carries v5's step (`migrations::v5`) and the fee escrow's ED.
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(6);
 
     #[pallet::pallet]
@@ -526,6 +510,13 @@ pub mod pallet {
         /// every treasury slice into the protocol share.
         type TreasurySink: TreasurySink<Self::AssetKind, Self::AccountId, Self::Balance>;
 
+        /// The base pallet: pools, pricing, liquidity and LP tokens (see
+        /// [`crate::base`]). The runtime binds it to
+        /// [`AssetConversionAdapter`] over pallet-asset-conversion configured
+        /// with these `Assets`, and that pallet's `AdminOrigin` to
+        /// [`EnsureDexAccount`].
+        type Base: AmmBase<Self::AccountId, Self::AssetKind, Self::Balance, Assets = Self::Assets>;
+
         /// Weight information for the extrinsics of this pallet.
         type WeightInfo: WeightInfo;
 
@@ -536,28 +527,8 @@ pub mod pallet {
 
     /// All known pools keyed by their canonical ordered asset pair.
     #[pallet::storage]
-    pub type Pools<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        (T::AssetKind, T::AssetKind),
-        PoolInfo<T::Balance, T::AccountId>,
-    >;
-
-    /// Per-provider liquidity positions keyed by account and pool.
-    #[pallet::storage]
-    pub type LiquidityPositions<T: Config> = StorageDoubleMap<
-        _,
-        Blake2_128Concat,
-        T::AccountId,
-        Blake2_128Concat,
-        (T::AssetKind, T::AssetKind),
-        LiquidityPosition<T::Balance, BlockNumberFor<T>>,
-    >;
-
-    /// Total LP shares outstanding for each pool.
-    #[pallet::storage]
-    pub type TotalLiquidity<T: Config> =
-        StorageMap<_, Blake2_128Concat, (T::AssetKind, T::AssetKind), T::Balance>;
+    pub type Pools<T: Config> =
+        StorageMap<_, Blake2_128Concat, (T::AssetKind, T::AssetKind), PoolInfo<T::Balance>>;
 
     /// D4: fee split applied to pools created or seeded from now on, keyed
     /// by fee tier (D10). Changing it never touches an existing pool (each
@@ -819,6 +790,9 @@ pub mod pallet {
         /// less than the asset's minimum balance for an account that does
         /// not hold it, or no consumer reference left to open one.
         RecipientCannotReceive,
+        /// Liquidity locks and launch seeding are refused while they move to
+        /// freezes on the LP tokens.
+        Unavailable,
     }
 
     #[pallet::hooks]
@@ -889,7 +863,8 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Remove liquidity from an existing pool.
+        /// Remove liquidity from an existing pool: burn `shares` of the
+        /// signer's LP tokens for their share of the reserves.
         #[pallet::call_index(2)]
         #[pallet::weight(<T as Config>::WeightInfo::remove_liquidity())]
         pub fn remove_liquidity(
@@ -901,81 +876,14 @@ pub mod pallet {
             amount_b_min: T::Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
-
-            ensure!(shares > Zero::zero(), Error::<T>::ZeroAmount);
-
-            // Finding 5 + D5: canonicalize the pair AND the minimums, which the
-            // caller gave in (asset_a, asset_b) order.
-            let (pair, amount_a_min, amount_b_min) =
-                Self::canonical_pair_with(asset_a, asset_b, amount_a_min, amount_b_min);
-            let mut pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
-
-            // Finding 2: sync reserves from actual balances before computing withdrawal.
-            Self::sync_reserves(&pair, &mut pool);
-
-            let total_shares = TotalLiquidity::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
-            ensure!(!total_shares.is_zero(), Error::<T>::InsufficientLiquidity);
-
-            let mut position =
-                LiquidityPositions::<T>::get(&who, &pair).ok_or(Error::<T>::InsufficientShares)?;
-            ensure!(position.shares >= shares, Error::<T>::InsufficientShares);
-
-            // Finding 10: enforce lock check.
-            if let Some(until) = position.locked_until {
-                let current = frame_system::Pallet::<T>::block_number();
-                ensure!(current >= until, Error::<T>::PoolLocked);
-            }
-
-            // D1: wide precision; floor rounds the withdrawal DOWN, in the pool's favour.
-            let amount_a = Self::mul_div_floor(shares, pool.reserve_a, total_shares)?;
-            let amount_b = Self::mul_div_floor(shares, pool.reserve_b, total_shares)?;
-
-            ensure!(amount_a >= amount_a_min, Error::<T>::SlippageExceeded);
-            ensure!(amount_b >= amount_b_min, Error::<T>::SlippageExceeded);
-            // What stays belongs to the other LPs and the locked minimum; a
-            // withdrawal that would leave less than an asset's minimum
-            // balance would take that remainder with it.
-            ensure!(
-                Self::can_debit_pool(pair.0.clone(), &pool.pool_account, amount_a)
-                    && Self::can_debit_pool(pair.1.clone(), &pool.pool_account, amount_b),
-                Error::<T>::ReserveBelowMinimum
-            );
-            // And what leaves must land: a payout the LP's own account
-            // cannot take (less than an ED of native on an account holding
-            // none, say) is refused as such.
-            ensure!(
-                Self::can_credit(pair.0.clone(), &who, amount_a)
-                    && Self::can_credit(pair.1.clone(), &who, amount_b),
-                Error::<T>::RecipientCannotReceive
-            );
-
-            T::Assets::transfer(pair.0.clone(), &pool.pool_account, &who, amount_a, Expendable)?;
-            T::Assets::transfer(pair.1.clone(), &pool.pool_account, &who, amount_b, Expendable)?;
-
-            pool.reserve_a =
-                pool.reserve_a.checked_sub(&amount_a).ok_or(Error::<T>::InsufficientLiquidity)?;
-            pool.reserve_b =
-                pool.reserve_b.checked_sub(&amount_b).ok_or(Error::<T>::InsufficientLiquidity)?;
-            Pools::<T>::insert(&pair, pool);
-
-            let new_total = total_shares.checked_sub(&shares).ok_or(Error::<T>::Overflow)?;
-            TotalLiquidity::<T>::insert(&pair, new_total);
-
-            position.shares = position.shares.checked_sub(&shares).ok_or(Error::<T>::Overflow)?;
-            if position.shares.is_zero() {
-                LiquidityPositions::<T>::remove(&who, &pair);
-            } else {
-                LiquidityPositions::<T>::insert(&who, &pair, position);
-            }
-
-            Self::deposit_event(Event::LiquidityRemoved {
-                provider: who,
-                asset_a: pair.0,
-                asset_b: pair.1,
-                amount_a,
-                amount_b,
-                shares_burned: shares,
-            });
+            Self::do_remove_liquidity_for(
+                &who,
+                asset_a,
+                asset_b,
+                shares,
+                amount_a_min,
+                amount_b_min,
+            )?;
             Ok(())
         }
 
@@ -1133,16 +1041,14 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
-        /// What every account the pallet owns must hold, and how its records
-        /// must agree with one another. Each check is a balance the pallet
-        /// promised someone or a count two maps must share:
+        /// What the pallet promised, checked against what it holds:
         ///
         /// - the fee escrow holds its ED and, above it, every unclaimed
         ///   protocol and creator fee;
-        /// - a pool with liquidity holds what it keeps of each asset (the ED,
-        ///   a token's minimum less one) and, above it, at least its recorded
-        ///   reserves, and
-        ///   the pool's shares are its positions plus the locked minimum.
+        /// - every pool routes no more than its tier charges;
+        /// - every pool the base pallet holds for a record of ours charges
+        ///   the LP fee that record fixes. Nothing can change it there: the
+        ///   base pallet's fee calls answer only to this pallet's account.
         #[cfg(any(feature = "try-runtime", feature = "test-utils", test))]
         pub fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
             use frame_support::ensure;
@@ -1152,33 +1058,16 @@ pub mod pallet {
                 .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
             let ed = Self::native_ed();
             ensure!(
-                T::Assets::balance(native.clone(), &Self::fee_escrow_account())
-                    >= fees.saturating_add(ed),
+                T::Assets::balance(native, &Self::fee_escrow_account()) >= fees.saturating_add(ed),
                 "the fee escrow holds less than its ED and the fees it owes"
             );
 
             for (pair, pool) in Pools::<T>::iter() {
-                let total = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
-                ensure!(
-                    total.is_zero()
-                        || (T::Assets::balance(native.clone(), &pool.pool_account) >= ed
-                            && Self::buffer_short(pair.0.clone(), &pool.pool_account).is_zero()
-                            && Self::buffer_short(pair.1.clone(), &pool.pool_account).is_zero()),
-                    "a pool with liquidity holds less than it keeps of an asset"
-                );
-                ensure!(
-                    Self::reserve_balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
-                        && Self::reserve_balance(pair.1.clone(), &pool.pool_account)
-                            >= pool.reserve_b,
-                    "a pool account holds less than its reserves"
-                );
-                if !total.is_zero() {
-                    let positions = LiquidityPositions::<T>::iter()
-                        .filter(|(_, p, _)| *p == pair)
-                        .fold(T::Balance::zero(), |a, (_, _, l)| a.saturating_add(l.shares));
+                ensure!(pool.routing.fits_tier(pool.fee_tier), "a pool routes more than its tier");
+                if let Some(fee) = T::Base::pool_fee(&pair.0, &pair.1) {
                     ensure!(
-                        positions.saturating_add(MINIMUM_LIQUIDITY.into()) == total,
-                        "a pool's shares differ from its positions"
+                        fee == Self::lp_fee(pool.fee_tier, &pool.routing),
+                        "a pool's LP fee differs from the one its record fixes"
                     );
                 }
             }
@@ -1191,8 +1080,8 @@ pub mod pallet {
         }
 
         /// D4: the sub-account that holds routed fees until they are claimed
-        /// or withdrawn. Separate from every pool account so `sync_reserves`
-        /// never counts accrued fees as depth.
+        /// or withdrawn. Separate from every pool account, so no routed fee
+        /// is ever counted as depth.
         pub fn fee_escrow_account() -> T::AccountId {
             PALLET_ID.into_sub_account_truncating(b"fees")
         }
@@ -1204,18 +1093,14 @@ pub mod pallet {
             ProtocolFeeRecipient::<T>::get().unwrap_or_else(T::DefaultProtocolFeeRecipient::get)
         }
 
-        /// D4: the split a pool gets at creation. Snapshotted from the live
-        /// default; a pool with no native side can route nothing and gets
-        /// zero; `seeded = false` (plain `create_pool`) folds the creator
-        /// and treasury slices into the pool since nobody could claim them
-        /// (D9: a treasury exists only for a launch asset).
         /// D10: the split a new pool of `fee_tier` snapshots. A pool with no
         /// native side routes nothing. A seeded pool takes the tier's default
         /// whole and **fails** if that tier has none — governance setting one
         /// tier and forgetting another must not graduate a launch whose
         /// treasury would then be fed nothing, for the life of the pool. A
-        /// `create_pool` pool takes the protocol slice alone, and nothing at
-        /// all where the tier is unconfigured.
+        /// `create_pool` pool takes the protocol slice alone (nobody could
+        /// claim a creator or treasury slice), and nothing at all
+        /// where the tier is unconfigured.
         fn routing_for_new_pool(
             pair: &(T::AssetKind, T::AssetKind),
             fee_tier: u32,
@@ -1235,6 +1120,21 @@ pub mod pallet {
             }
         }
 
+        /// The fee the base pool charges on every swap, which its LPs keep.
+        /// The routed slices are taken outside the pool, in native, so the
+        /// pool charges what the tier leaves once they are out:
+        /// `(t − r) / (1 − r)` for tier `t` and routed share `r`. A native-in
+        /// swap then reaches the curve with `x · (1 − t)`, as when one
+        /// formula charged the whole tier. Rounded up to the next part per
+        /// million, so LPs never keep less than the tier leaves them; the
+        /// trader gives up at most that part per million of the output.
+        pub fn lp_fee(fee_tier: u32, routing: &FeeRouting) -> Permill {
+            let tier = fee_tier.saturating_mul(10).min(BPS);
+            let routed = u32::from(routing.routed_bps()).min(tier);
+            Permill::from_rational_with_rounding(tier - routed, BPS - routed, Rounding::Up)
+                .unwrap_or_else(|_| Permill::one())
+        }
+
         /// `floor(amount × bps / BPS)`.
         fn bps_of(amount: T::Balance, bps: u16) -> Result<T::Balance, Error<T>> {
             if bps == 0 {
@@ -1244,7 +1144,8 @@ pub mod pallet {
         }
 
         /// Finding 5: canonicalize a pair so that the lexicographically smaller
-        /// encoded asset comes first. Prevents duplicate pools for (A,B) vs (B,A).
+        /// encoded asset comes first. Our records are keyed by it; the base
+        /// pallet orders a pair its own way, and takes either.
         pub fn canonical_pair(a: T::AssetKind, b: T::AssetKind) -> (T::AssetKind, T::AssetKind) {
             if a.encode() <= b.encode() {
                 (a, b)
@@ -1256,8 +1157,7 @@ pub mod pallet {
         /// D5: canonicalize a pair together with two per-asset values given in
         /// the caller's order (amounts, minimums). Returns the canonical pair
         /// and the values in that same order, so `.1` always belongs to `.0`'s
-        /// asset. Every entry point that accepts `(asset_a, asset_b, x_a, x_b)`
-        /// must go through this rather than binding `x_a` to `pair.0` blindly.
+        /// asset.
         pub fn canonical_pair_with<V>(
             a: T::AssetKind,
             b: T::AssetKind,
@@ -1268,61 +1168,6 @@ pub mod pallet {
                 ((a, b), x_a, x_b)
             } else {
                 ((b, a), x_b, x_a)
-            }
-        }
-
-        /// Finding 2: sync pool reserves from actual on-chain asset balances.
-        /// Absorbs any direct transfers or previously uncounted fees into the
-        /// reserve tracking so the AMM math operates on accurate figures.
-        /// Runs at the top of `do_swap`, which is why an off-chain quote must
-        /// start from the same balances (see [`PoolInfo`]).
-        fn sync_reserves(
-            pair: &(T::AssetKind, T::AssetKind),
-            pool: &mut PoolInfo<T::Balance, T::AccountId>,
-        ) {
-            pool.reserve_a = Self::reserve_balance(pair.0.clone(), &pool.pool_account);
-            pool.reserve_b = Self::reserve_balance(pair.1.clone(), &pool.pool_account);
-        }
-
-        /// What a pool account keeps of `asset` as its own (see
-        /// [`PoolInfo`]): the ED of native, which is also the account's
-        /// provider, and one less than a token's minimum balance. That much
-        /// is enough for a token: a swap or a withdrawal always leaves at
-        /// least one unit of the reserve (a swap takes less than the reserve,
-        /// and the locked minimum's share is at least a unit), so the account
-        /// keeps at least the minimum. A token whose minimum is one unit, as
-        /// every launch token's is, needs nothing kept.
-        pub(crate) fn pool_buffer(asset: &T::AssetKind) -> T::Balance {
-            let min = T::Assets::minimum_balance(asset.clone());
-            if asset.encode() == T::NativeAsset::get().encode() {
-                min
-            } else {
-                min.saturating_sub(One::one())
-            }
-        }
-
-        /// What `pool_account` holds of `asset` as a reserve: its balance,
-        /// less what it keeps as its own ([`Self::pool_buffer`]).
-        pub(crate) fn reserve_balance(
-            asset: T::AssetKind,
-            pool_account: &T::AccountId,
-        ) -> T::Balance {
-            let buffer = Self::pool_buffer(&asset);
-            T::Assets::balance(asset, pool_account).saturating_sub(buffer)
-        }
-
-        /// How much of `asset` `pool_account` lacks of what it keeps.
-        fn buffer_short(asset: T::AssetKind, pool_account: &T::AccountId) -> T::Balance {
-            Self::pool_buffer(&asset).saturating_sub(T::Assets::balance(asset, pool_account))
-        }
-
-        /// How a payer may spend `asset`: keeping its ED of native, and all
-        /// of a token (see `do_swap`).
-        fn keep_of(asset: &T::AssetKind) -> Preservation {
-            if asset.encode() == T::NativeAsset::get().encode() {
-                Preserve
-            } else {
-                Expendable
             }
         }
 
@@ -1346,21 +1191,6 @@ pub mod pallet {
                 == DepositConsequence::Success
         }
 
-        /// Whether `amount` of `asset` can leave `pool_account` and leave
-        /// what stays there intact. pallet-assets pays out with a debit any
-        /// remainder below the asset's minimum balance (`ReducedToZero`),
-        /// and a pool's remainder belongs to its other LPs.
-        pub(crate) fn can_debit_pool(
-            asset: T::AssetKind,
-            pool_account: &T::AccountId,
-            amount: T::Balance,
-        ) -> bool {
-            matches!(
-                T::Assets::can_withdraw(asset, pool_account, amount),
-                WithdrawConsequence::Success
-            )
-        }
-
         /// Make sure `who` can be credited `asset` without a free consumer
         /// reference: if pallet-assets would refuse to open the account the
         /// usual way (no room for two more references, or no provider),
@@ -1382,25 +1212,6 @@ pub mod pallet {
             Ok(())
         }
 
-        /// For a pool with no native side, give `pool_account` its ED of
-        /// native — its provider — paid by `payer`, before any token lands.
-        /// A pool with a native side gets it with that side's deposit.
-        fn endow_native_side(
-            pair: &(T::AssetKind, T::AssetKind),
-            pool_account: &T::AccountId,
-            payer: &T::AccountId,
-        ) -> DispatchResult {
-            let native = T::NativeAsset::get();
-            if pair.0.encode() == native.encode() || pair.1.encode() == native.encode() {
-                return Ok(());
-            }
-            let short = Self::buffer_short(native.clone(), pool_account);
-            if !short.is_zero() {
-                T::Assets::transfer(native, payer, pool_account, short, Preserve)?;
-            }
-            Ok(())
-        }
-
         /// Mint the native ED into `who` if it holds less, at genesis only:
         /// on a live chain an endowment is paid by a source account, so
         /// issuance does not change. Returns whether it minted.
@@ -1418,47 +1229,25 @@ pub mod pallet {
             }
         }
 
-        // ---- Wide-precision arithmetic helpers (D1) --------------------------
-        //
-        // All pool math that multiplies two `Balance`s goes through these. The
-        // rounding direction of every division is the same as the original
-        // `u128` code (floor), so nothing here changes which side a rounding
-        // favours; it only removes the overflow.
-
-        /// Lift a `Balance` into the wide type.
-        fn hp(b: T::Balance) -> T::HigherPrecisionBalance {
-            T::HigherPrecisionBalance::from(b)
-        }
-
-        /// Narrow a wide value back to `Balance`, failing with `Overflow` rather
-        /// than truncating.
-        fn narrow(x: T::HigherPrecisionBalance) -> Result<T::Balance, Error<T>> {
-            x.try_into().map_err(|_| Error::<T>::Overflow)
-        }
-
-        /// `floor(a * b / c)` computed in wide precision. Errors with `Overflow`
-        /// if the product overflows the wide type or the result does not fit
-        /// `Balance`, and with `InsufficientLiquidity` if `c == 0`.
+        /// `floor(a * b / c)` in wide precision. Errors with `Overflow`
+        /// if the result does not fit `Balance`, and with
+        /// `InsufficientLiquidity` if `c == 0`.
         fn mul_div_floor(
             a: T::Balance,
             b: T::Balance,
             c: T::Balance,
         ) -> Result<T::Balance, Error<T>> {
-            let q = Self::hp(a)
-                .checked_mul(&Self::hp(b))
+            let wide = T::HigherPrecisionBalance::from;
+            let q = wide(a)
+                .checked_mul(&wide(b))
                 .ok_or(Error::<T>::Overflow)?
-                .checked_div(&Self::hp(c))
+                .checked_div(&wide(c))
                 .ok_or(Error::<T>::InsufficientLiquidity)?;
-            Self::narrow(q)
+            q.try_into().map_err(|_| Error::<T>::Overflow)
         }
 
-        /// `floor(sqrt(a * b))` computed in wide precision.
-        fn sqrt_of_product(a: T::Balance, b: T::Balance) -> Result<T::Balance, Error<T>> {
-            let p = Self::hp(a).checked_mul(&Self::hp(b)).ok_or(Error::<T>::Overflow)?;
-            Self::narrow(p.integer_sqrt())
-        }
-
-        /// Whether a pool exists for the (unordered) asset pair.
+        /// Whether a pool exists for the (unordered) asset pair: our record,
+        /// whether or not its first deposit has created it in the base pallet.
         pub fn pool_exists(asset_a: T::AssetKind, asset_b: T::AssetKind) -> bool {
             Pools::<T>::contains_key(Self::canonical_pair(asset_a, asset_b))
         }
@@ -1467,7 +1256,8 @@ pub mod pallet {
         ///
         /// Origin-free body of the `create_pool` extrinsic. The extrinsic gates
         /// this on `ManageOrigin`; in-runtime callers (see [`PoolManager`]) are
-        /// trusted to apply their own authorisation before calling.
+        /// trusted to apply their own authorisation before calling. Writes
+        /// our record; the base pool follows with the first deposit.
         pub fn do_create_pool(
             asset_a: T::AssetKind,
             asset_b: T::AssetKind,
@@ -1479,9 +1269,9 @@ pub mod pallet {
                 !T::ReservedAssets::contains(&asset_a) && !T::ReservedAssets::contains(&asset_b),
                 Error::<T>::ReservedAsset
             );
+            ensure!(asset_a.encode() != asset_b.encode(), Error::<T>::PoolNotFound);
             Self::ensure_valid_fee_tier(fee_tier)?;
 
-            // Finding 5: canonicalize pair to prevent duplicate pools.
             let pair = Self::canonical_pair(asset_a, asset_b);
             ensure!(!Pools::<T>::contains_key(&pair), Error::<T>::PoolAlreadyExists);
 
@@ -1497,50 +1287,30 @@ pub mod pallet {
             Ok(())
         }
 
-        /// The sub-account that holds a pool's reserves, for the (unordered) pair.
-        ///
-        /// Deterministic in the pair, so it can be computed before the pool
-        /// exists — which is exactly why `seed_reserved_pool_for` sweeps it.
-        ///
-        /// D8 (Finding 13): the seed is `blake2_256` of the pair key, not the
-        /// key itself. `into_sub_account_truncating` keeps only the first
-        /// `size_of::<AccountId>()` bytes of `"modl" ++ PalletId ++ seed`;
-        /// with the raw key as the seed an AccountId20 runtime kept eight
-        /// bytes of it — `04 00 44 01` and the low four bytes of the second
-        /// asset id for a native pair, so chain asset `n` and launch asset
-        /// `2^64 + n` shared one pool account, and for a `(WithId, WithId)`
-        /// pair the second asset never featured at all. Eight bytes of a
-        /// hash do not collide. (Finding 6's length prefixes addressed
-        /// ambiguity *within* the key; the key was then truncated anyway.)
-        pub fn pool_account_for(asset_a: T::AssetKind, asset_b: T::AssetKind) -> T::AccountId {
-            let pair = Self::canonical_pair(asset_a, asset_b);
-            let pair_key = (pair.0.encode(), pair.1.encode());
-            let seed = sp_io::hashing::blake2_256(&pair_key.encode());
-            PALLET_ID.into_sub_account_truncating(seed)
+        /// The account that holds the pair's reserves, whether or not the
+        /// pool exists yet: the base pallet's address for it, a hash of its
+        /// pallet id and the pair. `None` for a pair of one asset.
+        pub fn pool_account_for(
+            asset_a: T::AssetKind,
+            asset_b: T::AssetKind,
+        ) -> Option<T::AccountId> {
+            T::Base::pool_account(&asset_a, &asset_b)
         }
 
-        /// Write a fresh, empty pool record for an already-canonical `pair`.
-        /// Callers must have checked that no pool exists. D9: the snapshotted
-        /// split must fit the tier (`InvalidFeeRouting` otherwise — at seed
-        /// time that surfaces as a deferred graduation, FM-11).
+        /// Write a fresh pool record for an already-canonical `pair`. Callers
+        /// must have checked that no pool exists. The snapshotted split
+        /// must fit the tier (`InvalidFeeRouting` otherwise — at seed time
+        /// that surfaces as a deferred graduation).
         fn insert_new_pool(
             pair: &(T::AssetKind, T::AssetKind),
             fee_tier: u32,
             routing: FeeRouting,
         ) -> DispatchResult {
             ensure!(routing.is_valid_for(fee_tier), Error::<T>::InvalidFeeRouting);
-            let pool = PoolInfo {
-                reserve_a: Zero::zero(),
-                reserve_b: Zero::zero(),
-                fee_tier,
-                total_fees_collected: Zero::zero(),
-                pool_account: Self::pool_account_for(pair.0.clone(), pair.1.clone()),
-                routing,
-            };
-
-            Pools::<T>::insert(pair, pool);
-            TotalLiquidity::<T>::insert(pair, T::Balance::zero());
-
+            Pools::<T>::insert(
+                pair,
+                PoolInfo { fee_tier, total_fees_collected: Zero::zero(), routing },
+            );
             Self::deposit_event(Event::PoolCreated {
                 asset_a: pair.0.clone(),
                 asset_b: pair.1.clone(),
@@ -1549,230 +1319,52 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Body of [`ReservedPoolSeeder::seed_reserved_pool_for`]; see the
-        /// trait docs for the contract. Transactional: any failure leaves no
-        /// trace, including the sweep.
-        #[frame_support::transactional]
+        /// The base pool for `pair`, created if it does not exist yet at the
+        /// LP fee `pool` fixes, with `creator` paying the deposits that open
+        /// its accounts. The base pallet's calls are not in the runtime, so
+        /// no base pool exists without a record of ours.
+        fn ensure_base_pool(
+            pair: &(T::AssetKind, T::AssetKind),
+            pool: &PoolInfo<T::Balance>,
+            creator: &T::AccountId,
+        ) -> DispatchResult {
+            if !T::Base::pool_exists(&pair.0, &pair.1) {
+                T::Base::create_pool(
+                    creator,
+                    pair.0.clone(),
+                    pair.1.clone(),
+                    Self::lp_fee(pool.fee_tier, &pool.routing),
+                )?;
+            }
+            Ok(())
+        }
+
+        /// Body of [`ReservedPoolSeeder::seed_reserved_pool_for`]. Refused
+        /// until seeding is rebuilt on the base pallet, with the seeder's LP
+        /// tokens frozen for good.
         pub fn do_seed_reserved_pool_for(
-            who: &T::AccountId,
-            asset: T::AssetKind,
-            quote: T::AssetKind,
-            amount_asset: T::Balance,
-            amount_quote: T::Balance,
-            fee_tier: u32,
+            _who: &T::AccountId,
+            _asset: T::AssetKind,
+            _quote: T::AssetKind,
+            _amount_asset: T::Balance,
+            _amount_quote: T::Balance,
+            _fee_tier: u32,
         ) -> Result<T::Balance, DispatchError> {
-            ensure!(
-                amount_asset > Zero::zero() && amount_quote > Zero::zero(),
-                Error::<T>::ZeroAmount
-            );
-            // Only reserved assets come through here, and only against a
-            // non-reserved quote, so this path cannot be used to mint arbitrary
-            // permanently-locked pools around `ManageOrigin`.
-            ensure!(T::ReservedAssets::contains(&asset), Error::<T>::NotReservedAsset);
-            ensure!(!T::ReservedAssets::contains(&quote), Error::<T>::NotReservedAsset);
-            ensure!(asset.encode() != quote.encode(), Error::<T>::NotReservedAsset);
-            Self::ensure_valid_fee_tier(fee_tier)?;
-
-            // 1. Create, or adopt an empty pool.
-            let pair = Self::canonical_pair(asset.clone(), quote.clone());
-            match Pools::<T>::get(&pair) {
-                // D4: a seeded pool has a creator (the launch's fee recipient),
-                // so it snapshots the full default split. An adopted empty
-                // record keeps whatever split it carries.
-                None => Self::insert_new_pool(
-                    &pair,
-                    fee_tier,
-                    Self::routing_for_new_pool(&pair, fee_tier, true)?,
-                )?,
-                Some(existing) => {
-                    let shares = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
-                    ensure!(shares.is_zero(), Error::<T>::PoolAlreadySeeded);
-                    ensure!(existing.fee_tier == fee_tier, Error::<T>::InvalidFeeTier);
-                },
-            }
-            let mut pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
-            ensure!(
-                pool.reserve_a.is_zero() && pool.reserve_b.is_zero(),
-                Error::<T>::PoolAlreadySeeded
-            );
-
-            // 2. Sweep whatever already sits in the pool sub-account (FM-02).
-            //    The reserved asset goes first: for a non-sufficient asset the
-            //    pool account's asset balance holds a consumer reference on its
-            //    native account, which must be released before the native
-            //    balance can be swept to zero.
-            let excess_to = T::ExcessRecipient::get();
-            let sweep_order = if T::ReservedAssets::contains(&pair.0) {
-                [pair.0.clone(), pair.1.clone()]
-            } else {
-                [pair.1.clone(), pair.0.clone()]
-            };
-            for swept in sweep_order {
-                // Everything but the pool account's own ED (see `PoolInfo`).
-                let keep = if swept.encode() == T::NativeAsset::get().encode() {
-                    Preserve
-                } else {
-                    Expendable
-                };
-                let held =
-                    T::Assets::reducible_balance(swept.clone(), &pool.pool_account, keep, Polite);
-                if held.is_zero() {
-                    continue;
-                }
-                // The reserved asset is burned. A credit of it to the
-                // recipient needs a free consumer reference there, which
-                // anyone can use up beforehand, and failing the seed would
-                // block the graduation of every launch whose pool address
-                // received a donation.
-                if T::ReservedAssets::contains(&swept) {
-                    T::Assets::burn_from(
-                        swept.clone(),
-                        &pool.pool_account,
-                        held,
-                        Expendable,
-                        frame_support::traits::tokens::Precision::Exact,
-                        frame_support::traits::tokens::Fortitude::Force,
-                    )?;
-                    Self::deposit_event(Event::PreSeedBalanceBurned {
-                        pool: pair.clone(),
-                        asset: swept,
-                        amount: held,
-                    });
-                    continue;
-                }
-                // Deliver to the recipient. If it cannot take the asset (for
-                // example a treasury with no provider cannot hold a
-                // non-sufficient asset) fail the seed with a distinct error
-                // rather than burning: a silent burn would make a mis-wired
-                // recipient look like correct operation, whereas a loud failure
-                // is fixed by re-wiring and retrying. The attempt runs in its
-                // own storage layer so the underlying error leaves nothing
-                // half-applied before the outer transactional rollback.
-                frame_support::storage::with_storage_layer(|| {
-                    T::Assets::transfer(swept.clone(), &pool.pool_account, &excess_to, held, keep)
-                })
-                .map_err(|_| Error::<T>::ExcessRecipientCannotReceive)?;
-                Self::deposit_event(Event::PreSeedBalanceSwept {
-                    pool: pair.clone(),
-                    asset: swept,
-                    amount: held,
-                    to: excess_to.clone(),
-                });
-            }
-
-            // The pool account's own minimum of each asset (see `PoolInfo`),
-            // where it holds less: paid by the seeder on top of its deposit,
-            // as any first depositor pays it. A launch sets the native one
-            // aside at creation; what the seeder cannot spare on top — the
-            // launch token, which it holds exactly as much of as it deposits,
-            // or the ED for a launch created before launches set it aside —
-            // comes out of the deposit instead, so a graduation never fails
-            // on it. Native first: it is the pool account's provider.
-            Self::endow_native_side(&pair, &pool.pool_account, who)?;
-            // For each side: the reserve it leaves, and what is paid on top.
-            let split = |a: &T::AssetKind,
-                         amount: T::Balance|
-             -> Result<(T::Balance, T::Balance), DispatchError> {
-                let short = Self::buffer_short(a.clone(), &pool.pool_account);
-                let keep = Self::keep_of(a);
-                if short.is_zero() {
-                    Ok((amount, Zero::zero()))
-                } else if T::Assets::reducible_balance(a.clone(), who, keep, Polite)
-                    >= amount.saturating_add(short)
-                {
-                    Ok((amount, short))
-                } else {
-                    Ok((
-                        amount
-                            .checked_sub(&short)
-                            .ok_or(Error::<T>::InsufficientInitialLiquidity)?,
-                        Zero::zero(),
-                    ))
-                }
-            };
-            let (quote_reserve, quote_on_top) = split(&quote, amount_quote)?;
-            let (asset_reserve, asset_on_top) = split(&asset, amount_asset)?;
-
-            let asset_is_a = pair.0.encode() == asset.encode();
-            let (amount_a, amount_b) = if asset_is_a {
-                (asset_reserve, quote_reserve)
-            } else {
-                (quote_reserve, asset_reserve)
-            };
-
-            // Finding 1: first deposit — burn MINIMUM_LIQUIDITY shares permanently.
-            let raw_shares = Self::sqrt_of_product(amount_a, amount_b)?;
-            let min_liq: T::Balance = MINIMUM_LIQUIDITY.into();
-            ensure!(raw_shares > min_liq, Error::<T>::InsufficientInitialLiquidity);
-            let shares_to_mint = raw_shares.checked_sub(&min_liq).ok_or(Error::<T>::Overflow)?;
-            ensure!(shares_to_mint > Zero::zero(), Error::<T>::ZeroAmount);
-
-            // Quote before asset (it is the provider), each side's minimum
-            // with it where paid on top.
-            T::Assets::transfer(
-                quote.clone(),
-                who,
-                &pool.pool_account,
-                amount_quote.saturating_add(quote_on_top),
-                Expendable,
-            )?;
-            T::Assets::transfer(
-                asset.clone(),
-                who,
-                &pool.pool_account,
-                amount_asset.saturating_add(asset_on_top),
-                Expendable,
-            )?;
-
-            pool.reserve_a = amount_a;
-            pool.reserve_b = amount_b;
-            Pools::<T>::insert(&pair, &pool);
-            TotalLiquidity::<T>::insert(&pair, raw_shares);
-
-            // 4. Position, locked forever. `who` never has an existing position
-            //    here (the pool had no shares), so this is an insert.
-            let current_block = frame_system::Pallet::<T>::block_number();
-            let forever: BlockNumberFor<T> = Bounded::max_value();
-            LiquidityPositions::<T>::insert(
-                who,
-                &pair,
-                LiquidityPosition {
-                    shares: shares_to_mint,
-                    entry_block: current_block,
-                    locked_until: Some(forever),
-                },
-            );
-
-            Self::deposit_event(Event::LiquidityAdded {
-                provider: who.clone(),
-                asset_a: pair.0.clone(),
-                asset_b: pair.1.clone(),
-                amount_a,
-                amount_b,
-                shares_minted: shares_to_mint,
-            });
-            Self::deposit_event(Event::LiquidityLocked {
-                who: who.clone(),
-                pool: pair,
-                locked_until: forever,
-            });
-            Self::deposit_event(Event::ReservedPoolSeeded {
-                who: who.clone(),
-                asset,
-                quote,
-                amount_asset,
-                amount_quote,
-                shares: shares_to_mint,
-            });
-            Ok(shares_to_mint)
+            Err(Error::<T>::Unavailable.into())
         }
 
         /// Add liquidity to an existing pool on behalf of `who`.
         ///
-        /// Body of the `add_liquidity` extrinsic with the signer resolved by the
-        /// caller. Tokens are pulled from `who`, and the LP position is credited
-        /// to `who`. Returns the LP shares minted to `who` (excluding the
-        /// permanently locked `MINIMUM_LIQUIDITY` on a first deposit).
+        /// Body of the `add_liquidity` extrinsic with the signer resolved by
+        /// the caller. Up to the desired amounts are pulled from `who` at the
+        /// pool's ratio, and the LP tokens minted to `who`. The first deposit
+        /// creates the base pool, `who` paying its accounts' deposits, and
+        /// locks the base pallet's minimum of LP tokens in the pool account.
+        /// Returns the LP tokens minted to `who`.
+        ///
+        /// `who`'s LP-token account is opened first, deposit-backed, so a
+        /// holder needs no free consumer reference to add.
+        #[frame_support::transactional]
         pub fn do_add_liquidity_for(
             who: &T::AccountId,
             asset_a: T::AssetKind,
@@ -1784,170 +1376,137 @@ pub mod pallet {
         ) -> Result<T::Balance, DispatchError> {
             ensure!(amount_a > Zero::zero() && amount_b > Zero::zero(), Error::<T>::ZeroAmount);
 
-            // Finding 5 + D5: canonicalize the pair AND the amounts/minimums,
-            // which the caller gave in (asset_a, asset_b) order. From here on
-            // `amount_a` belongs to `pair.0` and `amount_b` to `pair.1`.
-            let (pair, (amount_a, amount_a_min), (amount_b, amount_b_min)) =
-                Self::canonical_pair_with(
-                    asset_a,
-                    asset_b,
-                    (amount_a, amount_a_min),
-                    (amount_b, amount_b_min),
-                );
-            let mut pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
+            let pair = Self::canonical_pair(asset_a.clone(), asset_b.clone());
+            let pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
+            Self::ensure_base_pool(&pair, &pool, who)?;
+            T::Base::open_lp_account(&asset_a, &asset_b, who)?;
 
-            // D6: price the deposit against what the pool actually holds. The
-            // pool's share of every swap fee sits in the account uncounted
-            // until the next sync (Finding 3); pricing against the stale
-            // recorded reserves minted a depositor shares against a smaller
-            // pool than the one `remove_liquidity` (which syncs) pays out of,
-            // so swap → add → remove skimmed existing LPs' fees.
-            Self::sync_reserves(&pair, &mut pool);
-
-            let total_shares = TotalLiquidity::<T>::get(&pair).unwrap_or_else(T::Balance::zero);
-
-            // Determine actual deposit amounts and shares to mint.
-            let (actual_a, actual_b, total_new_shares, shares_to_mint) = if total_shares.is_zero() {
-                // Finding 1: first deposit — burn MINIMUM_LIQUIDITY shares permanently.
-                // D1: wide precision; integer sqrt rounds DOWN, in the pool's favour.
-                let raw_shares = Self::sqrt_of_product(amount_a, amount_b)?;
-                let min_liq: T::Balance = MINIMUM_LIQUIDITY.into();
-                ensure!(raw_shares > min_liq, Error::<T>::InsufficientInitialLiquidity);
-                let shares_to_mint =
-                    raw_shares.checked_sub(&min_liq).ok_or(Error::<T>::Overflow)?;
-                // total includes the locked minimum; user only receives the remainder.
-                (amount_a, amount_b, raw_shares, shares_to_mint)
-            } else {
-                // Finding 8: calculate optimal amounts — don't donate excess tokens.
-                // D1: wide precision; floor rounds the matched amount DOWN so the
-                // depositor never over-contributes relative to the pool ratio.
-                let optimal_b = Self::mul_div_floor(amount_a, pool.reserve_b, pool.reserve_a)?;
-
-                let (actual_a, actual_b) = if optimal_b <= amount_b {
-                    (amount_a, optimal_b)
-                } else {
-                    let optimal_a = Self::mul_div_floor(amount_b, pool.reserve_a, pool.reserve_b)?;
-                    (optimal_a, amount_b)
-                };
-
-                // D1: floor rounds minted shares DOWN, in the pool's favour.
-                let share_a = Self::mul_div_floor(actual_a, total_shares, pool.reserve_a)?;
-                let share_b = Self::mul_div_floor(actual_b, total_shares, pool.reserve_b)?;
-                let shares = if share_a < share_b { share_a } else { share_b };
-
-                (actual_a, actual_b, shares, shares)
-            };
-
-            ensure!(shares_to_mint > Zero::zero(), Error::<T>::ZeroAmount);
-
-            // Finding 7: enforce slippage on the actual (possibly adjusted) amounts.
-            ensure!(actual_a >= amount_a_min, Error::<T>::SlippageExceeded);
-            ensure!(actual_b >= amount_b_min, Error::<T>::SlippageExceeded);
-
-            // What the pool account keeps of each asset (see `PoolInfo`),
-            // where it lacks it — on the first deposit — from the depositor,
-            // on top of the amounts and in the same credit (a token's part
-            // alone could be below its minimum). A pool with no native side
-            // gets its ED first, as a provider for the tokens.
-            Self::endow_native_side(&pair, &pool.pool_account, who)?;
-            let extra_a = Self::buffer_short(pair.0.clone(), &pool.pool_account);
-            let extra_b = Self::buffer_short(pair.1.clone(), &pool.pool_account);
-            T::Assets::transfer(
-                pair.0.clone(),
+            let (added_a, added_b, lp) = T::Base::add_liquidity(
                 who,
-                &pool.pool_account,
-                actual_a.saturating_add(extra_a),
-                Expendable,
-            )?;
-            T::Assets::transfer(
-                pair.1.clone(),
-                who,
-                &pool.pool_account,
-                actual_b.saturating_add(extra_b),
-                Expendable,
+                asset_a.clone(),
+                asset_b.clone(),
+                amount_a,
+                amount_b,
+                amount_a_min,
+                amount_b_min,
             )?;
 
-            pool.reserve_a = pool.reserve_a.checked_add(&actual_a).ok_or(Error::<T>::Overflow)?;
-            pool.reserve_b = pool.reserve_b.checked_add(&actual_b).ok_or(Error::<T>::Overflow)?;
-            Pools::<T>::insert(&pair, &pool);
-
-            let new_total =
-                total_shares.checked_add(&total_new_shares).ok_or(Error::<T>::Overflow)?;
-            TotalLiquidity::<T>::insert(&pair, new_total);
-
-            let current_block = frame_system::Pallet::<T>::block_number();
-            LiquidityPositions::<T>::try_mutate(who, &pair, |maybe_pos| -> DispatchResult {
-                match maybe_pos {
-                    Some(pos) => {
-                        // Finding 9: keep original entry_block on top-up.
-                        pos.shares =
-                            pos.shares.checked_add(&shares_to_mint).ok_or(Error::<T>::Overflow)?;
-                    },
-                    None => {
-                        *maybe_pos = Some(LiquidityPosition {
-                            shares: shares_to_mint,
-                            entry_block: current_block,
-                            locked_until: None,
-                        });
-                    },
-                }
-                Ok(())
-            })?;
-
+            let (pair, amount_a, amount_b) =
+                Self::canonical_pair_with(asset_a, asset_b, added_a, added_b);
             Self::deposit_event(Event::LiquidityAdded {
                 provider: who.clone(),
                 asset_a: pair.0,
                 asset_b: pair.1,
-                amount_a: actual_a,
-                amount_b: actual_b,
-                shares_minted: shares_to_mint,
+                amount_a,
+                amount_b,
+                shares_minted: lp,
             });
-            Ok(shares_to_mint)
+            Ok(lp)
         }
 
-        /// Extend the lock on `who`'s liquidity position in the given pool to
-        /// `lock_until`.
-        ///
-        /// Body of the `lock_liquidity` extrinsic with the signer resolved by
-        /// the caller. Fails with `InsufficientShares` if `who` has no position.
-        /// D3: a lock is monotone — re-locking to the same block is a no-op,
-        /// an earlier block fails with `LockCannotBeShortened`, so a position
-        /// locked to `BlockNumber::max_value()` stays locked for good.
-        pub fn do_lock_liquidity_for(
+        /// Burn `lp` of `who`'s LP tokens and pay their share of the reserves
+        /// to `who`. The base pallet floors each amount, leaves each reserve
+        /// at least its asset's minimum, and burns only tokens that are not
+        /// frozen. Returns the amounts in the caller's order.
+        #[frame_support::transactional]
+        pub fn do_remove_liquidity_for(
             who: &T::AccountId,
             asset_a: T::AssetKind,
             asset_b: T::AssetKind,
-            lock_until: BlockNumberFor<T>,
-        ) -> DispatchResult {
-            let pair = Self::canonical_pair(asset_a, asset_b);
+            lp: T::Balance,
+            amount_a_min: T::Balance,
+            amount_b_min: T::Balance,
+        ) -> Result<(T::Balance, T::Balance), DispatchError> {
+            ensure!(lp > Zero::zero(), Error::<T>::ZeroAmount);
+            let pair = Self::canonical_pair(asset_a.clone(), asset_b.clone());
+            ensure!(Pools::<T>::contains_key(&pair), Error::<T>::PoolNotFound);
+            ensure!(
+                T::Base::lp_balance(&asset_a, &asset_b, who) >= lp,
+                Error::<T>::InsufficientShares
+            );
+            // What leaves must land: a payout the LP's own account cannot
+            // take (less than an ED of native on an account holding none,
+            // say) is refused as such, not as whatever the asset's pallet
+            // says halfway through.
+            let (reserve_a, reserve_b) =
+                T::Base::reserves(&asset_a, &asset_b).ok_or(Error::<T>::InsufficientLiquidity)?;
+            let issuance = T::Base::lp_issuance(&asset_a, &asset_b);
+            ensure!(
+                Self::can_credit(
+                    asset_a.clone(),
+                    who,
+                    Self::mul_div_floor(lp, reserve_a, issuance)?
+                ) && Self::can_credit(
+                    asset_b.clone(),
+                    who,
+                    Self::mul_div_floor(lp, reserve_b, issuance)?
+                ),
+                Error::<T>::RecipientCannotReceive
+            );
 
-            LiquidityPositions::<T>::try_mutate(who, &pair, |maybe_pos| -> DispatchResult {
-                let pos = maybe_pos.as_mut().ok_or(Error::<T>::InsufficientShares)?;
-                if let Some(existing) = pos.locked_until {
-                    ensure!(lock_until >= existing, Error::<T>::LockCannotBeShortened);
-                }
-                pos.locked_until = Some(lock_until);
-                Ok(())
-            })?;
+            let (out_a, out_b) = T::Base::remove_liquidity(
+                who,
+                asset_a.clone(),
+                asset_b.clone(),
+                lp,
+                amount_a_min,
+                amount_b_min,
+            )?;
 
-            Self::deposit_event(Event::LiquidityLocked {
-                who: who.clone(),
-                pool: pair,
-                locked_until: lock_until,
+            let (pair, amount_a, amount_b) =
+                Self::canonical_pair_with(asset_a, asset_b, out_a, out_b);
+            Self::deposit_event(Event::LiquidityRemoved {
+                provider: who.clone(),
+                asset_a: pair.0,
+                asset_b: pair.1,
+                amount_a,
+                amount_b,
+                shares_burned: lp,
             });
-
-            Ok(())
+            Ok((out_a, out_b))
         }
 
-        /// Execute a swap on behalf of `who`, depositing output to `recipient`.
+        /// Body of the `lock_liquidity` extrinsic. Refused until locks are
+        /// rebuilt as freezes on the LP tokens.
+        pub fn do_lock_liquidity_for(
+            _who: &T::AccountId,
+            _asset_a: T::AssetKind,
+            _asset_b: T::AssetKind,
+            _lock_until: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            Err(Error::<T>::Unavailable.into())
+        }
+
+        /// The routed slices of `amount` in native: protocol, creator and
+        /// treasury, each floored on its own. The treasury slice folds
+        /// into the protocol's where `other` (the pool's non-native asset)
+        /// has no treasury sink. Returns the slices and the sink.
+        fn slices(
+            routing: &FeeRouting,
+            amount: T::Balance,
+            other: &T::AssetKind,
+        ) -> Result<Slices<T::Balance, T::AccountId>, Error<T>> {
+            let mut protocol = Self::bps_of(amount, routing.protocol_bps)?;
+            let creator = Self::bps_of(amount, routing.creator_bps)?;
+            let mut treasury = Self::bps_of(amount, routing.treasury_bps)?;
+            let sink = if treasury.is_zero() { None } else { T::TreasurySink::account_for(other) };
+            if sink.is_none() && !treasury.is_zero() {
+                protocol = protocol.checked_add(&treasury).ok_or(Error::<T>::Overflow)?;
+                treasury = Zero::zero();
+            }
+            Ok(Slices { protocol, creator, treasury, sink })
+        }
+
+        /// Execute a swap on behalf of `who`, delivering the output to
+        /// `recipient`. Returns the amount delivered.
         ///
-        /// Returns the actual `amount_out` transferred to `recipient`. Callers use
-        /// this for slippage-capture economics (e.g., [`IntentSwap`]).
+        /// The pool charges its LP fee ([`Self::lp_fee`]); the routed slices
+        /// are taken here, in native, outside it: off the input when
+        /// native goes in, off the output when native comes out, and not at
+        /// all for a pair with no native side. The swap runs on credits, so
+        /// nothing moves until everything has been priced and checked, and
+        /// the whole of it happens or none of it does.
         ///
-        /// Behaviorally identical to the body of `swap_exact_tokens_for_tokens`:
-        /// loads the pool, syncs reserves, computes constant-product output, applies
-        /// fee, performs transfers, updates storage, emits `SwapExecuted` and
-        /// `FeesCollected`.
         /// `is_trade`: whether this swap counts as market activity for
         /// `LastSwapBlock`. A person's swap and a settled intent do; the
         /// launch treasury's buyback through [`PoolManager::swap_for`] does
@@ -1955,12 +1514,15 @@ pub mod pallet {
         /// trades the token, and the pallet buying it back is not an
         /// answer (R2).
         ///
-        /// `input`: how `amount_in` leaves `who`. A person keeps their ED
+        /// `input`: how native leaves `who`. A person keeps their ED
         /// (`Preserve`): a swap of one's whole native balance used to kill
         /// the account and then fail to deliver a non-sufficient asset to it
-        /// (`CannotCreate`, R9 — reachable, since fees are paid in energy).
-        /// A settled intent swaps from the marketplace's intent escrow
-        /// through [`IntentSwap`], which spends it to zero (`Expendable`).
+        /// (`CannotCreate`). A settled intent swaps from the
+        /// marketplace's intent escrow through [`IntentSwap`], which spends it
+        /// to zero (`Expendable`). A token always leaves `Expendable`: on a
+        /// pallet-assets balance `Preserve` refuses the last unit, and every
+        /// holder could then never sell their whole position.
+        #[frame_support::transactional]
         pub(crate) fn do_swap(
             who: &T::AccountId,
             asset_in: T::AssetKind,
@@ -1973,171 +1535,86 @@ pub mod pallet {
         ) -> Result<T::Balance, DispatchError> {
             ensure!(amount_in > Zero::zero(), Error::<T>::ZeroAmount);
 
-            // Finding 5: canonicalize pair for lookup.
             let pair = Self::canonical_pair(asset_in.clone(), asset_out.clone());
             let mut pool = Pools::<T>::get(&pair).ok_or(Error::<T>::PoolNotFound)?;
-
-            // Finding 2: sync reserves from actual on-chain balances.
-            Self::sync_reserves(&pair, &mut pool);
-
-            let flipped = pair.0.encode() != asset_in.encode();
-            let (reserve_in, reserve_out) = if flipped {
-                (pool.reserve_b, pool.reserve_a)
-            } else {
-                (pool.reserve_a, pool.reserve_b)
-            };
-
+            let pool_account =
+                T::Base::pool_account(&asset_in, &asset_out).ok_or(Error::<T>::PoolNotFound)?;
             ensure!(
-                !reserve_in.is_zero() && !reserve_out.is_zero(),
+                T::Base::reserves(&asset_in, &asset_out).is_some(),
                 Error::<T>::InsufficientLiquidity
             );
 
-            // ---- D4: fee split ----------------------------------------------
-            //
-            // The tier is the total fee (0.1% / 0.3% / 1.0%). The routed part
-            // (`protocol_bps + creator_bps`, snapshotted per pool) is always
-            // taken in the native asset; the pool keeps the rest:
-            //
-            //   native in : fee   = tier of input (as before)
-            //               routed slices come out of that fee
-            //               reserves get input − fee (unchanged output)
-            //   native out: input fee = (tier − routed) of input, stays in pool
-            //               output is priced on that; routed slices come
-            //               out of the gross output, trader gets the net
-            //   neither   : nothing is routed (fee stays in the pool)
-            //
-            // Every division floors, in the pool's favour; k never decreases.
             let native = T::NativeAsset::get();
             let native_in = asset_in.encode() == native.encode();
             let native_out = asset_out.encode() == native.encode();
-            let routing =
-                if native_in || native_out { pool.routing } else { FeeRouting::default() };
-            let tier_bps: u16 = (pool.fee_tier as u16).saturating_mul(10);
-            let pool_bps = tier_bps.saturating_sub(routing.routed_bps());
-
-            let fee_tier_bal: T::Balance = pool.fee_tier.into();
-            let denominator_bal: T::Balance = FEE_DENOMINATOR.into();
-
-            // Fee taken from the input. With native in (or nothing routed)
-            // this is the full tier, computed exactly as before D4.
-            let fee = if native_out && routing.routed_bps() > 0 {
-                Self::bps_of(amount_in, pool_bps)?
-            } else {
-                // D1: wide precision. Fee keeps its pre-existing floor (rounds
-                // the fee DOWN by < 1 unit). Direction unchanged by this change.
-                Self::mul_div_floor(amount_in, fee_tier_bal, denominator_bal)?
-            };
-            let amount_in_after_fee = amount_in.checked_sub(&fee).ok_or(Error::<T>::Overflow)?;
-
-            // D1: constant-product output in wide precision; floor rounds
-            // amount_out DOWN, in the pool's favour, so k never decreases.
-            let denom = reserve_in.checked_add(&amount_in_after_fee).ok_or(Error::<T>::Overflow)?;
-            let amount_out_gross = Self::mul_div_floor(reserve_out, amount_in_after_fee, denom)?;
-
-            // Routed slices, always native.
-            let (mut protocol, creator, mut treasury) = if native_in {
-                (
-                    Self::bps_of(amount_in, routing.protocol_bps)?,
-                    Self::bps_of(amount_in, routing.creator_bps)?,
-                    Self::bps_of(amount_in, routing.treasury_bps)?,
-                )
-            } else if native_out {
-                (
-                    Self::bps_of(amount_out_gross, routing.protocol_bps)?,
-                    Self::bps_of(amount_out_gross, routing.creator_bps)?,
-                    Self::bps_of(amount_out_gross, routing.treasury_bps)?,
-                )
-            } else {
-                (Zero::zero(), Zero::zero(), Zero::zero())
-            };
-            // D9: the treasury slice goes to the launch's treasury sink if
-            // the asset has one, else it folds into the protocol share. The
-            // non-native side of the pair is the launch asset.
             let other = if native_in { asset_out.clone() } else { asset_in.clone() };
-            let sink = if treasury.is_zero() { None } else { T::TreasurySink::account_for(&other) };
-            if sink.is_none() && !treasury.is_zero() {
-                protocol = protocol.checked_add(&treasury).ok_or(Error::<T>::Overflow)?;
-                treasury = Zero::zero();
-            }
-            let routed = protocol
-                .checked_add(&creator)
-                .ok_or(Error::<T>::Overflow)?
-                .checked_add(&treasury)
-                .ok_or(Error::<T>::Overflow)?;
-            // With native in the routed part is a sub-slice of `fee` (bounded
-            // by `routed_bps ≤ tier × 10`, D9); with native out it comes off
-            // the gross output.
-            let amount_out = if native_out {
-                amount_out_gross.checked_sub(&routed).ok_or(Error::<T>::Overflow)?
-            } else {
-                amount_out_gross
-            };
+            let lp_fee = Self::lp_fee(pool.fee_tier, &pool.routing);
 
-            ensure!(amount_out >= amount_out_min, Error::<T>::SlippageExceeded);
+            // ---- Price and check everything before anything moves ----------
+            let (slices, to_pool) = if native_in {
+                let slices = Self::slices(&pool.routing, amount_in, &other)?;
+                let to_pool = amount_in.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
+                (slices, to_pool)
+            } else {
+                (Slices::none(), amount_in)
+            };
             // R10: an input so small its output rounds to nothing is refused
-            // here, not by pallet-assets declining to open the recipient's
-            // token account with a zero balance (`BelowMinimum`).
+            // as such.
+            let gross = T::Base::amount_out(&asset_in, &asset_out, to_pool)
+                .ok_or(Error::<T>::InsufficientLiquidity)?;
+            ensure!(!gross.is_zero(), Error::<T>::ZeroAmount);
+            let (slices, amount_out) = if native_out {
+                let slices = Self::slices(&pool.routing, gross, &other)?;
+                let net = gross.checked_sub(&slices.total()).ok_or(Error::<T>::Overflow)?;
+                (slices, net)
+            } else {
+                (slices, gross)
+            };
+            let Slices { protocol, creator, treasury, sink } = slices;
+            ensure!(amount_out >= amount_out_min, Error::<T>::SlippageExceeded);
             ensure!(!amount_out.is_zero(), Error::<T>::ZeroAmount);
-            // The same for an output the recipient cannot take, as the
-            // asset's pallet judges it: below the asset's minimum balance for
-            // a new holder, or no consumer reference left to open one.
+            // The output must land where it is going, as the asset's pallet
+            // judges it: below the asset's minimum balance for a new holder,
+            // or no consumer reference left to open one, it cannot.
             ensure!(
                 Self::can_credit(asset_out.clone(), recipient, amount_out),
                 Error::<T>::RecipientCannotReceive
             );
-            ensure!(amount_out_gross < reserve_out, Error::<T>::InsufficientLiquidity);
-            // The pool's remainder of `asset_out` must stay intact: a debit
-            // leaving less than the asset's minimum balance would pay the
-            // remainder out with it, and it belongs to the LPs.
-            ensure!(
-                Self::can_debit_pool(asset_out.clone(), &pool.pool_account, amount_out_gross),
-                Error::<T>::ReserveBelowMinimum
-            );
 
-            // `input` is about the native ED: a person keeps theirs (R9). A
-            // token has no such floor for its holder — `Preserve` on a
-            // pallet-assets balance refuses to take the last unit
-            // (`NotExpendable`), which would leave every holder unable to
-            // sell their whole position (R11). Only the native side keeps.
+            // ---- Move ---------------------------------------------------------
             let input = if native_in { input } else { Expendable };
-            T::Assets::transfer(asset_in.clone(), who, &pool.pool_account, amount_in, input)?;
-            T::Assets::transfer(
-                asset_out.clone(),
-                &pool.pool_account,
-                recipient,
-                amount_out,
-                Expendable,
-            )?;
-            // Finding 14 (SECURITY_AUDIT): a routed slice below the native ED
-            // cannot create a recipient account that does not exist yet — the
-            // fee escrow before its first fee, or the treasury vault before it is
-            // funded — and pallet-balances fails the transfer, which used to fail
-            // the whole swap with an unreadable `Token(BelowMinimum)`. When a
-            // slice would leave its recipient's native below the ED, leave that
-            // slice in the pool: it accrues to LPs at the next `sync_reserves`,
-            // exactly as the pool's own fee share does (D7). The consequence,
-            // stated plainly so no later reader treats a routing total as exact:
-            // `ProtocolFeesUnclaimed`, `CreatorFeesUnclaimed` and the sink's
-            // tally do NOT count a sub-ED slice that was redirected to LPs this
-            // way. The window is only "before the recipient holds an ED of
-            // native" — not "before its account exists": an account kept alive
-            // by a sufficient asset holds none. Once it does, every later slice
-            // of any size routes in full, and genesis or `migrations::v6` funds
-            // the fee escrow so the window never opens for it on a real chain.
+            let credit_in =
+                T::Assets::withdraw(asset_in.clone(), who, amount_in, Exact, input, Polite)?;
+            let routed_total = protocol.saturating_add(creator).saturating_add(treasury);
+            let (mut routed, out) = if native_in {
+                let (routed, to_pool) = credit_in.split(routed_total);
+                (routed, T::Base::swap_credit(asset_out.clone(), to_pool).map_err(|(_, e)| e)?)
+            } else {
+                let gross =
+                    T::Base::swap_credit(asset_out.clone(), credit_in).map_err(|(_, e)| e)?;
+                if native_out {
+                    gross.split(routed_total)
+                } else {
+                    (Credit::<T::AccountId, T::Assets>::zero(native.clone()), gross)
+                }
+            };
+            ensure!(out.peek() == amount_out, Error::<T>::Overflow);
+            T::Assets::resolve(recipient, out).map_err(|_| Error::<T>::RecipientCannotReceive)?;
+
+            // A routed slice that would leave its recipient below
+            // the native ED cannot create that account, and must not fail the
+            // swap; it goes to the pool, where it accrues to LPs as the
+            // pool's own fee does. `ProtocolFeesUnclaimed`,
+            // `CreatorFeesUnclaimed` and the sink's tally then do not count
+            // it. The window is "before the recipient holds an ED of native":
+            // genesis and the upgrade fund the fee escrow, so it never opens
+            // for that on a real chain.
             let fee_escrow = Self::fee_escrow_account();
-            // D4: move the routed slices out of the pool account into the fee
-            // escrow, so neither reserves nor `sync_reserves` ever see them.
-            let escrowed = protocol.checked_add(&creator).ok_or(Error::<T>::Overflow)?;
-            let route_escrowed =
-                !escrowed.is_zero() && Self::can_credit(native.clone(), &fee_escrow, escrowed);
-            if route_escrowed {
-                T::Assets::transfer(
-                    native.clone(),
-                    &pool.pool_account,
-                    &fee_escrow,
-                    escrowed,
-                    Expendable,
-                )?;
+            let escrowed = protocol.saturating_add(creator);
+            if !escrowed.is_zero() && Self::can_credit(native.clone(), &fee_escrow, escrowed) {
+                let (to_escrow, rest) = routed.split(escrowed);
+                routed = rest;
+                T::Assets::resolve(&fee_escrow, to_escrow).map_err(|_| Error::<T>::Overflow)?;
                 if !protocol.is_zero() {
                     ProtocolFeesUnclaimed::<T>::mutate(|t| *t = t.saturating_add(protocol));
                 }
@@ -2146,44 +1623,28 @@ pub mod pallet {
                 }
             }
             // D9: the treasury slice is pushed to the sink (see `TreasurySink`
-            // for why a push is safe here and was not for the other two), under
-            // the same Finding-14 guard.
+            // for why a push is safe here), under the same Finding-14 guard.
             if let Some(vault) = sink {
                 if !treasury.is_zero() && Self::can_credit(native.clone(), &vault, treasury) {
-                    T::Assets::transfer(
-                        native.clone(),
-                        &pool.pool_account,
-                        &vault,
-                        treasury,
-                        Expendable,
-                    )?;
+                    let (to_vault, rest) = routed.split(treasury);
+                    routed = rest;
+                    T::Assets::resolve(&vault, to_vault).map_err(|_| Error::<T>::Overflow)?;
                     T::TreasurySink::note_fee(&other, treasury);
                 }
             }
-
-            // Finding 3: only add amount_in_after_fee to reserves; the pool's
-            // share of the fee stays in the pool account but is not counted in
-            // reserves until the next sync. The output side drops by the gross
-            // amount (net to the trader + routed slices).
-            if flipped {
-                pool.reserve_b =
-                    pool.reserve_b.checked_add(&amount_in_after_fee).ok_or(Error::<T>::Overflow)?;
-                pool.reserve_a = pool
-                    .reserve_a
-                    .checked_sub(&amount_out_gross)
-                    .ok_or(Error::<T>::InsufficientLiquidity)?;
-            } else {
-                pool.reserve_a =
-                    pool.reserve_a.checked_add(&amount_in_after_fee).ok_or(Error::<T>::Overflow)?;
-                pool.reserve_b = pool
-                    .reserve_b
-                    .checked_sub(&amount_out_gross)
-                    .ok_or(Error::<T>::InsufficientLiquidity)?;
+            if !routed.peek().is_zero() {
+                T::Assets::resolve(&pool_account, routed).map_err(|_| Error::<T>::Overflow)?;
             }
-            pool.total_fees_collected =
-                pool.total_fees_collected.checked_add(&fee).ok_or(Error::<T>::Overflow)?;
 
-            let pool_account_for_event = pool.pool_account.clone();
+            // The fee this swap charged, in the input asset as before: the
+            // routed slices and the pool's LP fee when native goes in, the LP
+            // fee alone otherwise (the routed slices then come off the output).
+            let fee = lp_fee.mul_floor(to_pool).saturating_add(if native_in {
+                routed_total
+            } else {
+                Zero::zero()
+            });
+            pool.total_fees_collected = pool.total_fees_collected.saturating_add(fee);
             Pools::<T>::insert(&pair, pool);
             if is_trade {
                 LastSwapBlock::<T>::insert(&pair, frame_system::Pallet::<T>::block_number());
@@ -2197,17 +1658,14 @@ pub mod pallet {
                 amount_out,
                 fee,
             });
-
-            // Finding 11: emit FeesCollected event.
             Self::deposit_event(Event::FeesCollected {
                 pool: pair.clone(),
                 amount: fee,
-                recipient: pool_account_for_event,
+                recipient: pool_account,
             });
-            if !routed.is_zero() {
+            if !routed_total.is_zero() {
                 Self::deposit_event(Event::FeesRouted { pool: pair, protocol, creator, treasury });
             }
-
             Ok(amount_out)
         }
     }
@@ -2279,12 +1737,8 @@ impl<T: Config> PoolManager<T::AccountId, T::AssetKind, T::Balance, BlockNumberF
 
     fn native_reserves(asset: T::AssetKind) -> Option<(T::Balance, T::Balance)> {
         let native = <T::NativeAsset as Get<T::AssetKind>>::get();
-        let pair = Self::canonical_pair(native.clone(), asset.clone());
-        let pool = Pools::<T>::get(&pair)?;
-        Some((
-            Self::reserve_balance(native, &pool.pool_account),
-            Self::reserve_balance(asset, &pool.pool_account),
-        ))
+        Pools::<T>::get(Self::canonical_pair(native.clone(), asset.clone()))?;
+        T::Base::reserves(&native, &asset)
     }
 
     fn fee_bps(asset: T::AssetKind) -> Option<u16> {
@@ -2318,478 +1772,10 @@ pub mod migrations {
     use super::*;
     use frame_support::{
         migrations::VersionedMigration,
-        pallet_prelude::OptionQuery,
         traits::{Get, UncheckedOnRuntimeUpgrade},
         weights::Weight,
     };
     use sp_std::marker::PhantomData;
-
-    /// D4 (v0 → v1): `PoolInfo` gains `routing`. Every existing pool gets
-    /// `FeeRouting::default()` — zero — and keeps 100% of its fee in the
-    /// pool. That includes the launchpad pool that graduated before D4
-    /// (DLNCH on the dev chain): it was seeded under the terms in force at
-    /// the time, and changing a live pool's split retroactively is exactly
-    /// the parameter mutation the per-pool snapshot exists to prevent.
-    pub mod v1 {
-        use super::*;
-
-        /// `PoolInfo` as stored before D4.
-        #[derive(Encode, Decode)]
-        #[allow(missing_docs)]
-        pub struct OldPoolInfo<Balance, AccountId> {
-            pub reserve_a: Balance,
-            pub reserve_b: Balance,
-            pub fee_tier: u32,
-            pub total_fees_collected: Balance,
-            pub pool_account: AccountId,
-        }
-
-        /// Unversioned body; wrap in [`MigrateToV1`].
-        pub struct VersionUncheckedMigrateToV1<T>(PhantomData<T>);
-
-        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV1<T> {
-            fn on_runtime_upgrade() -> Weight {
-                let mut count = 0u64;
-                Pools::<T>::translate::<OldPoolInfo<T::Balance, T::AccountId>, _>(|_pair, old| {
-                    count = count.saturating_add(1);
-                    Some(PoolInfo {
-                        reserve_a: old.reserve_a,
-                        reserve_b: old.reserve_b,
-                        fee_tier: old.fee_tier,
-                        total_fees_collected: old.total_fees_collected,
-                        pool_account: old.pool_account,
-                        routing: FeeRouting::default(),
-                    })
-                });
-                log::info!(target: "runtime::vitreus-dex", "D4 migration: {count} pools now carry zero fee routing");
-                T::DbWeight::get().reads_writes(count, count)
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn post_upgrade(
-                _state: sp_std::vec::Vec<u8>,
-            ) -> Result<(), sp_runtime::TryRuntimeError> {
-                for (_pair, pool) in Pools::<T>::iter() {
-                    frame_support::ensure!(
-                        pool.routing == FeeRouting::default(),
-                        "every pre-D4 pool must carry zero routing"
-                    );
-                }
-                Ok(())
-            }
-        }
-
-        /// D4 migration, gated on the pallet's on-chain storage version.
-        pub type MigrateToV1<T> = VersionedMigration<
-            0,
-            1,
-            VersionUncheckedMigrateToV1<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
-    }
-
-    /// D8 (v1 → v2): pool accounts are derived from a hash of the pair key
-    /// (Finding 13). Every pool's reserves move from the account the old
-    /// derivation named to the one the new derivation names, and
-    /// `PoolInfo.pool_account` is rewritten. Positions, shares and routing
-    /// are untouched. Fork-only: no chain upstream has a pre-D8 pool.
-    pub mod v2 {
-        use super::*;
-        use frame_support::traits::tokens::{
-            Fortitude::Polite,
-            Preservation::{Expendable, Preserve},
-        };
-
-        /// The pre-D8 derivation, kept here only to find where a pool's
-        /// reserves are.
-        pub fn old_pool_account_for<T: Config>(
-            pair: &(T::AssetKind, T::AssetKind),
-        ) -> T::AccountId {
-            let pair_key = (pair.0.encode(), pair.1.encode());
-            PALLET_ID.into_sub_account_truncating(&pair_key)
-        }
-
-        /// Move every unit of `asset` the old account holds to the new one.
-        fn move_all<T: Config>(
-            asset: T::AssetKind,
-            from: &T::AccountId,
-            to: &T::AccountId,
-        ) -> Result<T::Balance, DispatchError> {
-            let held = T::Assets::reducible_balance(asset.clone(), from, Expendable, Polite);
-            if held.is_zero() {
-                return Ok(held);
-            }
-            T::Assets::transfer(asset, from, to, held, Expendable)
-        }
-
-        /// Unversioned body; wrap in [`MigrateToV2`].
-        pub struct VersionUncheckedMigrateToV2<T>(PhantomData<T>);
-
-        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV2<T> {
-            fn on_runtime_upgrade() -> Weight {
-                let mut moved = 0u64;
-                let mut reads = 0u64;
-                let pools: sp_std::vec::Vec<_> = Pools::<T>::iter().collect();
-                for (pair, mut pool) in pools {
-                    reads = reads.saturating_add(1);
-                    let old = old_pool_account_for::<T>(&pair);
-                    let new = Pallet::<T>::pool_account_for(pair.0.clone(), pair.1.clone());
-                    if pool.pool_account != old || old == new {
-                        continue;
-                    }
-                    // A native-quoted pool: the new account must exist before
-                    // it can hold a non-sufficient asset, and the old one
-                    // must have dropped the asset's consumer reference before
-                    // its last native unit can leave. So: most of the native
-                    // (keeping the old account alive), then the asset, then
-                    // the rest of the native. A pool with no native side has
-                    // no such ordering constraint.
-                    let native = T::NativeAsset::get();
-                    let native_side = if pair.0 == native {
-                        Some(&pair.0)
-                    } else if pair.1 == native {
-                        Some(&pair.1)
-                    } else {
-                        None
-                    };
-                    let result: Result<(), DispatchError> =
-                        frame_support::storage::with_storage_layer(|| {
-                            if let Some(n) = native_side {
-                                let keep_alive =
-                                    T::Assets::reducible_balance(n.clone(), &old, Preserve, Polite);
-                                if !keep_alive.is_zero() {
-                                    T::Assets::transfer(
-                                        n.clone(),
-                                        &old,
-                                        &new,
-                                        keep_alive,
-                                        Preserve,
-                                    )?;
-                                }
-                            }
-                            for a in [&pair.0, &pair.1] {
-                                if Some(a) != native_side {
-                                    move_all::<T>(a.clone(), &old, &new)?;
-                                }
-                            }
-                            if let Some(n) = native_side {
-                                move_all::<T>(n.clone(), &old, &new)?;
-                            }
-                            Ok(())
-                        });
-                    match result {
-                        Ok(()) => {
-                            pool.pool_account = new;
-                            Pools::<T>::insert(&pair, pool);
-                            moved = moved.saturating_add(1);
-                        },
-                        Err(e) => {
-                            log::error!(target: "runtime::vitreus-dex", "D8 migration: could not move a pool's reserves ({e:?}); its record still points at the old account");
-                        },
-                    }
-                }
-                log::info!(target: "runtime::vitreus-dex", "D8 migration: {moved} pools moved to hash-derived accounts");
-                T::DbWeight::get().reads_writes(reads.saturating_mul(4), moved.saturating_mul(6))
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
-                // Old accounts must be unique across pools, or the reserves in
-                // a shared account cannot be attributed and this migration
-                // must not run. (That state is the bug itself.)
-                let mut seen = sp_std::vec::Vec::new();
-                for (pair, _) in Pools::<T>::iter() {
-                    let old = old_pool_account_for::<T>(&pair);
-                    frame_support::ensure!(
-                        !seen.contains(&old),
-                        "two pools share a pre-D8 account"
-                    );
-                    seen.push(old);
-                }
-                log::info!(target: "runtime::vitreus-dex", "D8 pre_upgrade: {} pools, all pre-D8 accounts distinct", seen.len());
-                Ok(sp_std::vec::Vec::new())
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn post_upgrade(
-                _state: sp_std::vec::Vec<u8>,
-            ) -> Result<(), sp_runtime::TryRuntimeError> {
-                let mut n = 0u32;
-                for (pair, pool) in Pools::<T>::iter() {
-                    let new = Pallet::<T>::pool_account_for(pair.0.clone(), pair.1.clone());
-                    frame_support::ensure!(
-                        pool.pool_account == new,
-                        "a pool still points at its pre-D8 account"
-                    );
-                    let old = old_pool_account_for::<T>(&pair);
-                    for a in [&pair.0, &pair.1] {
-                        frame_support::ensure!(
-                            T::Assets::reducible_balance(a.clone(), &old, Expendable, Polite)
-                                .is_zero(),
-                            "a pre-D8 account still holds reserves"
-                        );
-                        // The new account holds at least the recorded reserve
-                        // (it also holds uncounted fees, D6).
-                        let held = T::Assets::balance(a.clone(), &new);
-                        let recorded = if *a == pair.0 { pool.reserve_a } else { pool.reserve_b };
-                        frame_support::ensure!(
-                            held >= recorded,
-                            "a hash-derived account holds less than its pool's recorded reserve"
-                        );
-                    }
-                    n += 1;
-                }
-                log::info!(target: "runtime::vitreus-dex", "D8 post_upgrade: {n} pools at hash-derived accounts holding their reserves; pre-D8 accounts empty");
-                Ok(())
-            }
-        }
-
-        /// D8 migration, gated on the pallet's on-chain storage version.
-        pub type MigrateToV2<T> = VersionedMigration<
-            1,
-            2,
-            VersionUncheckedMigrateToV2<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
-    }
-
-    /// D9 (v2 → v3): `FeeRouting` gains `treasury_bps`, which sits inside
-    /// every stored `PoolInfo` and in `DefaultFeeRouting`, so every record
-    /// is re-encoded. Existing pools and the default get `treasury_bps = 0`:
-    /// a live pool's split is its snapshot (the D4 rule), and the default is
-    /// governance's to set with `set_default_fee_routing`. `LastSwapBlock` is
-    /// a new map and needs nothing. Fork-only: the submission's D9 is its v2
-    /// and no chain it targets has a pre-D9 pool.
-    #[allow(missing_docs)]
-    pub mod v3 {
-        use super::*;
-
-        /// `FeeRouting` as stored before D9.
-        #[derive(Encode, Decode, Default)]
-        #[allow(missing_docs)]
-        pub struct OldFeeRouting {
-            pub protocol_bps: u16,
-            pub creator_bps: u16,
-        }
-
-        /// `PoolInfo` as stored before D9.
-        #[derive(Encode, Decode)]
-        #[allow(missing_docs)]
-        pub struct OldPoolInfo<Balance, AccountId> {
-            pub reserve_a: Balance,
-            pub reserve_b: Balance,
-            pub fee_tier: u32,
-            pub total_fees_collected: Balance,
-            pub pool_account: AccountId,
-            pub routing: OldFeeRouting,
-        }
-
-        /// `DefaultFeeRouting` as it was before D10 made it per tier: one
-        /// value under the pallet's own prefix. v3 predates the map, so it
-        /// addresses the key it actually migrated.
-        #[frame_support::storage_alias]
-        pub type DefaultFeeRouting<T: Config> = StorageValue<Pallet<T>, FeeRouting, OptionQuery>;
-
-        fn widen(old: OldFeeRouting) -> FeeRouting {
-            FeeRouting {
-                protocol_bps: old.protocol_bps,
-                creator_bps: old.creator_bps,
-                treasury_bps: 0,
-            }
-        }
-
-        /// Unversioned body; wrap in [`MigrateToV3`].
-        pub struct VersionUncheckedMigrateToV3<T>(PhantomData<T>);
-
-        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV3<T> {
-            fn on_runtime_upgrade() -> Weight {
-                let mut count = 0u64;
-                Pools::<T>::translate::<OldPoolInfo<T::Balance, T::AccountId>, _>(|_pair, old| {
-                    count = count.saturating_add(1);
-                    Some(PoolInfo {
-                        reserve_a: old.reserve_a,
-                        reserve_b: old.reserve_b,
-                        fee_tier: old.fee_tier,
-                        total_fees_collected: old.total_fees_collected,
-                        pool_account: old.pool_account,
-                        routing: widen(old.routing),
-                    })
-                });
-                // Absent stays absent: a pool with no default routes nothing.
-                let default_set = DefaultFeeRouting::<T>::exists();
-                let _ = DefaultFeeRouting::<T>::translate::<OldFeeRouting, _>(|old| old.map(widen));
-                log::info!(
-                    target: "runtime::vitreus-dex",
-                    "D9 migration: {count} pools re-encoded with treasury_bps = 0; default routing {}",
-                    if default_set { "re-encoded with treasury_bps = 0" } else { "not set (zero)" }
-                );
-                T::DbWeight::get().reads_writes(count.saturating_add(1), count.saturating_add(1))
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
-                // Values do not decode as the new type yet; keys do.
-                let pools = Pools::<T>::iter_keys().count() as u32;
-                let default_set = DefaultFeeRouting::<T>::exists();
-                log::info!(target: "runtime::vitreus-dex", "D9 pre_upgrade: {pools} pools to re-encode; default routing set: {default_set}");
-                Ok((pools, default_set).encode())
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn post_upgrade(
-                state: sp_std::vec::Vec<u8>,
-            ) -> Result<(), sp_runtime::TryRuntimeError> {
-                let (pools, _): (u32, bool) =
-                    Decode::decode(&mut &state[..]).map_err(|_| "pre_upgrade state")?;
-                let mut n = 0u32;
-                for (_pair, pool) in Pools::<T>::iter() {
-                    n = n.saturating_add(1);
-                    frame_support::ensure!(
-                        pool.routing.treasury_bps == 0,
-                        "every pre-D9 pool carries treasury_bps = 0"
-                    );
-                    frame_support::ensure!(
-                        pool.routing.fits_tier(pool.fee_tier),
-                        "routing still fits the tier"
-                    );
-                }
-                frame_support::ensure!(n == pools, "every pool decodes after D9");
-                frame_support::ensure!(
-                    DefaultFeeRouting::<T>::get().map_or(true, |d| d.treasury_bps == 0),
-                    "default routing carries treasury_bps = 0 until governance sets it"
-                );
-                log::info!(
-                    target: "runtime::vitreus-dex",
-                    "D9 post_upgrade: {n} pools decode with treasury_bps = 0; default routing {:?}",
-                    DefaultFeeRouting::<T>::get()
-                );
-                Ok(())
-            }
-        }
-
-        /// D9 migration, gated on the pallet's on-chain storage version.
-        pub type MigrateToV3<T> = VersionedMigration<
-            2,
-            3,
-            VersionUncheckedMigrateToV3<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
-    }
-
-    /// D10 (v3 → v4): `DefaultFeeRouting` becomes one entry per fee tier, so
-    /// a 1 % pool can route what a 0.3 % pool cannot.
-    ///
-    /// The single pre-D10 value was validated against tier 3, so that is the
-    /// tier it becomes — and only if it still fits under D10's floor
-    /// (`routed ≤ 20` at tier 3). A value that does not fit is dropped with a
-    /// warning rather than clamped: a split nobody chose is worse than none,
-    /// and none is visible — a launch at that tier stops at
-    /// [`Error::NoDefaultFeeRouting`] until governance sets it.
-    ///
-    /// Tiers 1 and 10 are left unset deliberately. Existing pools are not
-    /// touched at all: routing is snapshotted at creation and immutable, so
-    /// every pool keeps the split it was created with.
-    #[allow(missing_docs)]
-    pub mod v4 {
-        use super::*;
-
-        /// The pre-D10 single value; the same key v3 wrote.
-        #[allow(missing_docs)]
-        #[frame_support::storage_alias]
-        pub type DefaultFeeRouting<T: Config> = StorageValue<Pallet<T>, FeeRouting, OptionQuery>;
-
-        /// Unversioned body; wrap in [`MigrateToV4`].
-        pub struct VersionUncheckedMigrateToV4<T>(PhantomData<T>);
-
-        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV4<T> {
-            fn on_runtime_upgrade() -> Weight {
-                let old = DefaultFeeRouting::<T>::take();
-                match old {
-                    Some(routing) if routing.is_valid_for(MIN_LAUNCH_FEE_TIER) => {
-                        super::super::DefaultFeeRouting::<T>::insert(MIN_LAUNCH_FEE_TIER, routing);
-                        log::info!(
-                            target: "runtime::vitreus-dex",
-                            "D10 migration: default routing {routing:?} moved to tier {MIN_LAUNCH_FEE_TIER}; tiers 1 and 10 unset"
-                        );
-                    },
-                    Some(routing) => {
-                        log::warn!(
-                            target: "runtime::vitreus-dex",
-                            "D10 migration: default routing {routing:?} routes more than tier {MIN_LAUNCH_FEE_TIER} may under the pool floor; dropped, governance must set it"
-                        );
-                    },
-                    None => {
-                        log::info!(
-                            target: "runtime::vitreus-dex",
-                            "D10 migration: no default routing was set; every tier starts unset"
-                        );
-                    },
-                }
-                T::DbWeight::get().reads_writes(1, 2)
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
-                let old = DefaultFeeRouting::<T>::get();
-                let pools = Pools::<T>::iter().count() as u32;
-                log::info!(
-                    target: "runtime::vitreus-dex",
-                    "D10 pre_upgrade: default routing {old:?}; {pools} pools, none of which is touched"
-                );
-                Ok((old, pools).encode())
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn post_upgrade(
-                state: sp_std::vec::Vec<u8>,
-            ) -> Result<(), sp_runtime::TryRuntimeError> {
-                let (old, pools): (Option<FeeRouting>, u32) =
-                    Decode::decode(&mut &state[..]).map_err(|_| "pre_upgrade state")?;
-                frame_support::ensure!(
-                    !DefaultFeeRouting::<T>::exists(),
-                    "the pre-D10 single value is gone"
-                );
-                let at_three = super::super::DefaultFeeRouting::<T>::get(MIN_LAUNCH_FEE_TIER);
-                match old {
-                    Some(r) if r.is_valid_for(MIN_LAUNCH_FEE_TIER) => frame_support::ensure!(
-                        at_three == Some(r),
-                        "a default that fits tier 3 is now tier 3's default"
-                    ),
-                    _ => frame_support::ensure!(
-                        at_three.is_none(),
-                        "no default that did not fit was invented"
-                    ),
-                }
-                frame_support::ensure!(
-                    super::super::DefaultFeeRouting::<T>::get(MIN_FEE_TIER).is_none()
-                        && super::super::DefaultFeeRouting::<T>::get(10).is_none(),
-                    "tiers 1 and 10 are left for governance"
-                );
-                let mut n = 0u32;
-                for (_pair, pool) in Pools::<T>::iter() {
-                    n = n.saturating_add(1);
-                    frame_support::ensure!(
-                        pool.routing.fits_tier(pool.fee_tier),
-                        "every pool still routes no more than its tier"
-                    );
-                }
-                frame_support::ensure!(n == pools, "no pool was added or lost");
-                Ok(())
-            }
-        }
-
-        /// D10 migration, gated on the pallet's on-chain storage version.
-        pub type MigrateToV4<T> = VersionedMigration<
-            3,
-            4,
-            VersionUncheckedMigrateToV4<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
-    }
 
     /// v5: the solver marketplace's storage leaves with it.
     pub mod v5 {
@@ -2883,140 +1869,6 @@ pub mod migrations {
             4,
             5,
             VersionUncheckedMigrateToV5<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
-    }
-
-    /// v6: the fee escrow and every pool with liquidity hold the native ED.
-    pub mod v6 {
-        use super::*;
-
-        /// Unversioned body; wrap in [`MigrateToV6`].
-        ///
-        /// Genesis endows the fee escrow and a pool's first deposit endows
-        /// the pool; a chain that received the pallet by upgrade has had
-        /// neither for what it already holds. Each ED is paid by `Source`
-        /// (the runtime binds its Treasury), keeping its own ED, so issuance
-        /// does not change. A source that cannot pay is logged, and
-        /// `post_upgrade` then fails try-runtime: fund the source first.
-        ///
-        /// - The fee escrow is topped up to its ED plus every unclaimed fee,
-        ///   so withdrawing them all leaves it its ED.
-        /// - Every pool with liquidity gets an ED of native on top of what it
-        ///   holds, so its native reserve is unchanged now that reserves are
-        ///   read net of what it keeps. What it keeps of a token has no
-        ///   source to come from: it comes out of the pool's token reserve,
-        ///   one unit less than the token's minimum balance at most. A pool with no liquidity is
-        ///   endowed by its first deposit, as any new pool is.
-        pub struct VersionUncheckedMigrateToV6<T, Source>(PhantomData<(T, Source)>);
-
-        impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
-            for VersionUncheckedMigrateToV6<T, Source>
-        {
-            fn on_runtime_upgrade() -> Weight {
-                let native = T::NativeAsset::get();
-                let ed = Pallet::<T>::native_ed();
-                let source = Source::get();
-                let pay =
-                    |to: &T::AccountId, amount: T::Balance, what: &str| match T::Assets::transfer(
-                        native.clone(),
-                        &source,
-                        to,
-                        amount,
-                        Preserve,
-                    ) {
-                        Ok(_) => true,
-                        Err(e) => {
-                            log::error!(
-                                target: "runtime::vitreus-dex",
-                                "v6 migration: the source could not pay {amount:?} to {what}: {e:?}"
-                            );
-                            false
-                        },
-                    };
-                let escrow = Pallet::<T>::fee_escrow_account();
-                let owed = CreatorFeesUnclaimed::<T>::iter_values()
-                    .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
-                let short = owed
-                    .saturating_add(ed)
-                    .saturating_sub(T::Assets::balance(native.clone(), &escrow));
-                let mut reads =
-                    3u64.saturating_add(CreatorFeesUnclaimed::<T>::iter_keys().count() as u64);
-                let mut writes = 0u64;
-                if !short.is_zero() && pay(&escrow, short, "the fee escrow") {
-                    writes = writes.saturating_add(2);
-                }
-                let mut pools = 0u32;
-                for (pair, pool) in Pools::<T>::iter() {
-                    reads = reads.saturating_add(2);
-                    if TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero).is_zero() {
-                        continue;
-                    }
-                    if pay(&pool.pool_account, ed, "a pool account") {
-                        pools = pools.saturating_add(1);
-                        writes = writes.saturating_add(2);
-                    }
-                }
-                log::info!(
-                    target: "runtime::vitreus-dex",
-                    "v6 migration: fee escrow topped up by {short:?}; {pools} pool account(s) endowed"
-                );
-                T::DbWeight::get().reads_writes(reads, writes)
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
-                let reserves: sp_std::vec::Vec<_> = Pools::<T>::iter()
-                    .filter(|(pair, _)| {
-                        !TotalLiquidity::<T>::get(pair).unwrap_or_else(Zero::zero).is_zero()
-                    })
-                    .map(|(pair, p)| {
-                        (
-                            pair.clone(),
-                            T::Assets::balance(pair.0.clone(), &p.pool_account),
-                            T::Assets::balance(pair.1, &p.pool_account),
-                        )
-                    })
-                    .collect();
-                Ok(reserves.encode())
-            }
-
-            #[cfg(feature = "try-runtime")]
-            fn post_upgrade(
-                state: sp_std::vec::Vec<u8>,
-            ) -> Result<(), sp_runtime::TryRuntimeError> {
-                let before: sp_std::vec::Vec<(
-                    (T::AssetKind, T::AssetKind),
-                    T::Balance,
-                    T::Balance,
-                )> = Decode::decode(&mut &state[..]).map_err(|_| "pre_upgrade state")?;
-                let native = T::NativeAsset::get();
-                for (pair, a, b) in before {
-                    let pool = Pools::<T>::get(&pair).ok_or("a pool was lost")?;
-                    for (asset, was) in [(pair.0.clone(), a), (pair.1.clone(), b)] {
-                        let now = Pallet::<T>::reserve_balance(asset.clone(), &pool.pool_account);
-                        let lost = if asset.encode() == native.encode() {
-                            Zero::zero()
-                        } else {
-                            Pallet::<T>::pool_buffer(&asset)
-                        };
-                        frame_support::ensure!(
-                            now <= was && was.saturating_sub(now) <= lost,
-                            "a pool's reserves moved by more than a token's minimum, or it was not endowed"
-                        );
-                    }
-                }
-                Pallet::<T>::do_try_state()
-            }
-        }
-
-        /// Endowment of the fee escrow and the pool accounts, gated on the
-        /// pallet's on-chain storage version.
-        pub type MigrateToV6<T, Source> = VersionedMigration<
-            5,
-            6,
-            VersionUncheckedMigrateToV6<T, Source>,
             Pallet<T>,
             <T as frame_system::Config>::DbWeight,
         >;

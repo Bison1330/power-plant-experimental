@@ -149,8 +149,8 @@ fn no_solver_escrow_derives_another_pallet_account() {
             Marketplace::protocol_treasury_account(),
             VitreusDex::account_id(),
             VitreusDex::fee_escrow_account(),
-            VitreusDex::pool_account_for(NativeOrAssetId::Native, usdc()),
-            VitreusDex::pool_account_for(NativeOrAssetId::Native, vnrg()),
+            VitreusDex::pool_account_for(NativeOrAssetId::Native, usdc()).unwrap(),
+            VitreusDex::pool_account_for(NativeOrAssetId::Native, vnrg()).unwrap(),
         ];
         for id in [0u64, 1, 2, 255, 256, u32::MAX as u64] {
             seen.push(Marketplace::solver_escrow_account(id));

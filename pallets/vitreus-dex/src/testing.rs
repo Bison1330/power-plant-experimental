@@ -113,3 +113,105 @@ where
         .find(|id| !pallet_assets::Pallet::<T>::asset_exists(*id))
         .expect("free asset id below the reserved range")
 }
+
+/// The base pallet as a runtime wires it under the DEX, for a mock built on
+/// the DEX: pallet-asset-conversion with its `AdminOrigin` the DEX's own
+/// account, the LP tokens in pallet-assets `Instance2` with no deposits and
+/// no origin for its calls, and pallet-assets-freezer on them. The mock's
+/// `construct_runtime!` must name `AssetConversion`, `PoolAssets` (as
+/// `pallet_assets::<Instance2>`) and `PoolAssetsFreezer`, and its DEX
+/// `Config` set `type Base = pallet_vitreus_dex::AssetConversionAdapter<Self>`.
+///
+/// Asset kinds are `NativeOrWithId<$asset_id>`; `$native` is a `Get` of the
+/// native one, `$assets` the DEX's `Config::Assets`.
+#[macro_export]
+macro_rules! impl_base_pallet_for_mock {
+    ($runtime:ty, $account:ty, $asset_id:ty, $assets:ty, $native:ty) => {
+        $crate::impl_base_pallet_for_mock!(
+            @inner $runtime, $account, $asset_id,
+            frame_support::traits::fungible::NativeOrWithId<$asset_id>, $assets, $native
+        );
+    };
+    (@inner $runtime:ty, $account:ty, $asset_id:ty, $asset_kind:ty, $assets:ty, $native:ty) => {
+        impl pallet_assets::Config<frame_support::instances::Instance2> for $runtime {
+            type RuntimeEvent = RuntimeEvent;
+            type Holder = ();
+            type ReserveData = ();
+            type Balance = u128;
+            type RemoveItemsLimit = frame_support::traits::ConstU32<1000>;
+            type AssetId = u32;
+            type AssetIdParameter = u32;
+            type Currency = Balances;
+            type CreateOrigin = frame_support::traits::AsEnsureOriginWithArg<
+                frame_support::traits::NeverEnsureOrigin<$account>,
+            >;
+            type ForceOrigin = frame_system::EnsureRoot<$account>;
+            type AssetDeposit = frame_support::traits::ConstU128<0>;
+            type AssetAccountDeposit = frame_support::traits::ConstU128<0>;
+            type MetadataDepositBase = frame_support::traits::ConstU128<0>;
+            type MetadataDepositPerByte = frame_support::traits::ConstU128<0>;
+            type ApprovalDeposit = frame_support::traits::ConstU128<0>;
+            type StringLimit = frame_support::traits::ConstU32<50>;
+            type Freezer = PoolAssetsFreezer;
+            type Extra = ();
+            type WeightInfo = ();
+            type CallbackHandle = ();
+            pallet_assets::runtime_benchmarks_enabled! {
+                type BenchmarkHelper = ();
+            }
+        }
+
+        impl pallet_assets_freezer::Config<frame_support::instances::Instance2> for $runtime {
+            type RuntimeFreezeReason = RuntimeFreezeReason;
+            type RuntimeEvent = RuntimeEvent;
+        }
+
+        frame_support::parameter_types! {
+            pub const AssetConversionPalletId: frame_support::PalletId =
+                frame_support::PalletId(*b"vtrs/amm");
+            pub const BaseLpFee: sp_runtime::Permill = sp_runtime::Permill::from_parts(3_000);
+            pub const MaxSwapFee: sp_runtime::Permill = sp_runtime::Permill::from_percent(1);
+            pub const LiquidityWithdrawalFee: sp_runtime::Permill = sp_runtime::Permill::zero();
+        }
+
+        pub type PoolIdToAccountId = pallet_asset_conversion::AccountIdConverter<
+            AssetConversionPalletId,
+            ($asset_kind, $asset_kind),
+        >;
+        pub type PoolLocator = pallet_asset_conversion::Chain<
+            pallet_asset_conversion::WithFirstAsset<
+                $native,
+                $account,
+                $asset_kind,
+                PoolIdToAccountId,
+            >,
+            pallet_asset_conversion::Ascending<$account, $asset_kind, PoolIdToAccountId>,
+        >;
+
+        impl pallet_asset_conversion::Config for $runtime {
+            type RuntimeEvent = RuntimeEvent;
+            type Balance = u128;
+            type HigherPrecisionBalance = sp_core::U256;
+            type AssetKind = $asset_kind;
+            type Assets = $assets;
+            type PoolId = ($asset_kind, $asset_kind);
+            type PoolLocator = PoolLocator;
+            type PoolAssetId = u32;
+            type PoolAssets = PoolAssets;
+            type LPFee = BaseLpFee;
+            type AdminOrigin = $crate::EnsureDexAccount<$runtime>;
+            type MaxSwapFee = MaxSwapFee;
+            type PoolSetupFee = frame_support::traits::ConstU128<0>;
+            type PoolSetupFeeAsset = $native;
+            type PoolSetupFeeTarget = ();
+            type LiquidityWithdrawalFee = LiquidityWithdrawalFee;
+            type MintMinLiquidity =
+                frame_support::traits::ConstU128<{ $crate::MINIMUM_LIQUIDITY as u128 }>;
+            type MaxSwapPathLength = frame_support::traits::ConstU32<2>;
+            type PalletId = AssetConversionPalletId;
+            type WeightInfo = ();
+            #[cfg(feature = "runtime-benchmarks")]
+            type BenchmarkHelper = pallet_asset_conversion::NativeOrWithIdFactory<$asset_id>;
+        }
+    };
+}

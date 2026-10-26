@@ -40,7 +40,7 @@ use frame_support::{
     traits::tokens::Preservation,
 };
 use pallet_vitreus_dex::{
-    CreatorFeesUnclaimed, IntentSwap, LiquidityPositions, ProtocolFeesUnclaimed, ReservedPoolSeeder,
+    AmmBase, CreatorFeesUnclaimed, IntentSwap, ProtocolFeesUnclaimed, ReservedPoolSeeder,
 };
 use proptest::{
     prelude::*,
@@ -270,7 +270,11 @@ fn pool_asset(i: u8) -> u32 {
     POOL_ASSETS[i as usize % POOL_ASSETS.len()]
 }
 fn pool_account(asset: u32) -> AccountId {
-    VitreusDex::pool_account_for(native(), kind(asset))
+    VitreusDex::pool_account_for(native(), kind(asset)).unwrap()
+}
+/// `who`'s LP tokens in the native pool of `asset`.
+fn lp_of(who: &AccountId, asset: &NativeOrAssetId) -> u128 {
+    <Test as pallet_vitreus_dex::Config>::Base::lp_balance(&native(), asset, who)
 }
 
 fn resolve(target: &Target) -> AccountId {
@@ -462,8 +466,7 @@ impl World {
             Op::RemoveLiquidity { who, pool, permille } => {
                 let who = actor(who);
                 let asset = kind(pool_asset(pool));
-                let pair = VitreusDex::canonical_pair(native(), asset.clone());
-                let shares = LiquidityPositions::<Test>::get(who, &pair)?.shares;
+                let shares = Some(lp_of(&who, &asset)).filter(|s| *s > 0)?;
                 let shares = (shares * permille as u128 / 1000).max(1);
                 (
                     "remove_liquidity",
@@ -675,28 +678,26 @@ impl World {
         }
         // Every LP but the pool's last may leave in full; the last leaves
         // all but what the pool must keep, which is not judged here.
-        let positions: Vec<_> = LiquidityPositions::<Test>::iter()
-            .filter(|(_, _, p)| p.locked_until.is_none())
-            .collect();
-        for (who, pair, p) in positions {
-            let others = LiquidityPositions::<Test>::iter()
-                .filter(|(w, q, l)| *q == pair && *w != who && l.shares > 0)
-                .count();
-            if others == 0 {
-                continue;
+        for asset in POOL_ASSETS.iter().map(|a| kind(*a)) {
+            for who in ACTORS {
+                let shares = lp_of(&who, &asset);
+                let others = ACTORS.iter().filter(|w| **w != who && lp_of(w, &asset) > 0).count();
+                if shares == 0 || others == 0 {
+                    continue;
+                }
+                stuck(
+                    "an LP's exit",
+                    VitreusDex::remove_liquidity(
+                        RuntimeOrigin::signed(who),
+                        native(),
+                        asset.clone(),
+                        shares,
+                        0,
+                        0,
+                    ),
+                    self,
+                );
             }
-            stuck(
-                "an LP's exit",
-                VitreusDex::remove_liquidity(
-                    RuntimeOrigin::signed(who),
-                    pair.0,
-                    pair.1,
-                    p.shares,
-                    0,
-                    0,
-                ),
-                self,
-            );
         }
         self.check_invariants("drain");
     }

@@ -105,7 +105,8 @@ fn asset_kind<T: Config>(id: LaunchId) -> AssetKindOf<T> {
 /// Returns the recipient's balances before the sweep for [`assert_swept`].
 fn arm_worst_case_seed<T: Config>(id: LaunchId) -> (BalanceOf<T>, BalanceOf<T>) {
     let launch = Launches::<T>::get(id).expect("launch");
-    let pool = DexOf::<T>::pool_account_for(T::NativeAssetKind::get(), asset_kind::<T>(id));
+    let pool = DexOf::<T>::pool_account_for(T::NativeAssetKind::get(), asset_kind::<T>(id))
+        .expect("a pool address");
     fund::<T>(&pool, small_quote::<T>());
     T::LaunchAssets::mint_into(launch.asset_id, &pool, small_quote::<T>()).expect("mint to pool");
     let excess = <T as pallet_vitreus_dex::Config>::ExcessRecipient::get();
@@ -127,7 +128,8 @@ fn arm_worst_case_seed<T: Config>(id: LaunchId) -> (BalanceOf<T>, BalanceOf<T>) 
 /// runtime.
 fn assert_swept<T: Config>(id: LaunchId, before: (BalanceOf<T>, BalanceOf<T>)) {
     let launch = Launches::<T>::get(id).expect("launch");
-    let pool = DexOf::<T>::pool_account_for(T::NativeAssetKind::get(), asset_kind::<T>(id));
+    let pool = DexOf::<T>::pool_account_for(T::NativeAssetKind::get(), asset_kind::<T>(id))
+        .expect("a pool address");
     let terms = Launchpad::<T>::curve_terms(id).expect("terms");
     let raise: BalanceOf<T> = curve::raise_at_sellout(&terms, T::Sellable::get().into())
         .expect("raise")

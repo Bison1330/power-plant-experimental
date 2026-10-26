@@ -22,6 +22,9 @@ construct_runtime!(
         Balances: pallet_balances,
         Assets: pallet_assets,
         VitreusDex: pallet_vitreus_dex,
+        AssetConversion: pallet_asset_conversion,
+        PoolAssets: pallet_assets::<Instance2>,
+        PoolAssetsFreezer: pallet_assets_freezer::<Instance2>,
         Marketplace: pallet_solver_marketplace,
     }
 );
@@ -112,6 +115,8 @@ impl frame_support::traits::Contains<NativeOrAssetId> for ReservedAssets {
     }
 }
 
+pallet_vitreus_dex::impl_base_pallet_for_mock!(Test, AccountId, u32, NativeAndAssets, NativeAsset);
+
 impl pallet_vitreus_dex::Config for Test {
     type ManageOrigin = EnsureRoot<AccountId>;
     type Balance = u128;
@@ -127,6 +132,7 @@ impl pallet_vitreus_dex::Config for Test {
     // No launch has a treasury here: every treasury slice folds into the
     // protocol share.
     type TreasurySink = ();
+    type Base = pallet_vitreus_dex::AssetConversionAdapter<Self>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();
@@ -248,8 +254,16 @@ fn build_runtime_like_ext(genesis: bool) -> sp_io::TestExternalities {
     ext.execute_with(|| {
         System::set_block_number(1);
         if !genesis {
-            use frame_support::traits::UncheckedOnRuntimeUpgrade;
-            pallet_vitreus_dex::migrations::v6::VersionUncheckedMigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
+            // What the upgrade does for the DEX's fee escrow: its ED, from
+            // the treasury's stand-in.
+            use frame_support::traits::fungible::Mutate as _;
+            Balances::transfer(
+                &UpgradeSource::get(),
+                &VitreusDex::fee_escrow_account(),
+                RUNTIME_ED,
+                frame_support::traits::tokens::Preservation::Preserve,
+            )
+            .unwrap();
             System::reset_events();
         }
     });

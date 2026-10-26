@@ -4,15 +4,11 @@ use super::*;
 use crate as pallet_vitreus_dex;
 
 use frame_support::{
-    construct_runtime, derive_impl,
-    instances::Instance2,
-    parameter_types,
-    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32, NeverEnsureOrigin},
-    PalletId,
+    construct_runtime, derive_impl, parameter_types,
+    traits::{AsEnsureOriginWithArg, ConstU128, ConstU32},
 };
 use frame_system::{EnsureRoot, EnsureSigned};
-use pallet_asset_conversion::{AccountIdConverter, Ascending, Chain, WithFirstAsset};
-use sp_runtime::{traits::IdentityLookup, BuildStorage, Permill};
+use sp_runtime::{traits::IdentityLookup, BuildStorage};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -74,77 +70,7 @@ impl pallet_assets::Config for Test {
 
 pub type NativeOrAssetId = frame_support::traits::fungible::NativeOrWithId<u32>;
 
-/// The LP tokens: a pallet-assets instance of their own with no deposits,
-/// whose accounts only the DEX opens, and whose calls no origin reaches.
-impl pallet_assets::Config<Instance2> for Test {
-    type RuntimeEvent = RuntimeEvent;
-    type Holder = ();
-    type ReserveData = ();
-    type Balance = u128;
-    type RemoveItemsLimit = ConstU32<1000>;
-    type AssetId = u32;
-    type AssetIdParameter = u32;
-    type Currency = Balances;
-    type CreateOrigin = AsEnsureOriginWithArg<NeverEnsureOrigin<AccountId>>;
-    type ForceOrigin = EnsureRoot<Self::AccountId>;
-    type AssetDeposit = ConstU128<0>;
-    type AssetAccountDeposit = ConstU128<0>;
-    type MetadataDepositBase = ConstU128<0>;
-    type MetadataDepositPerByte = ConstU128<0>;
-    type ApprovalDeposit = ConstU128<0>;
-    type StringLimit = ConstU32<50>;
-    type Freezer = PoolAssetsFreezer;
-    type Extra = ();
-    type WeightInfo = ();
-    type CallbackHandle = ();
-    pallet_assets::runtime_benchmarks_enabled! {
-        type BenchmarkHelper = ();
-    }
-}
-
-impl pallet_assets_freezer::Config<Instance2> for Test {
-    type RuntimeFreezeReason = RuntimeFreezeReason;
-    type RuntimeEvent = RuntimeEvent;
-}
-
-parameter_types! {
-    pub const AssetConversionPalletId: PalletId = PalletId(*b"vtrs/amm");
-    pub const BaseLpFee: Permill = Permill::from_parts(3_000);
-    pub const MaxSwapFee: Permill = Permill::from_percent(1);
-    pub const LiquidityWithdrawalFee: Permill = Permill::zero();
-}
-
-pub type PoolIdToAccountId =
-    AccountIdConverter<AssetConversionPalletId, (NativeOrAssetId, NativeOrAssetId)>;
-pub type PoolLocator = Chain<
-    WithFirstAsset<NativeAsset, AccountId, NativeOrAssetId, PoolIdToAccountId>,
-    Ascending<AccountId, NativeOrAssetId, PoolIdToAccountId>,
->;
-
-impl pallet_asset_conversion::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
-    type Balance = u128;
-    type HigherPrecisionBalance = sp_core::U256;
-    type AssetKind = NativeOrAssetId;
-    type Assets = NativeAndAssets;
-    type PoolId = (NativeOrAssetId, NativeOrAssetId);
-    type PoolLocator = PoolLocator;
-    type PoolAssetId = u32;
-    type PoolAssets = PoolAssets;
-    type LPFee = BaseLpFee;
-    type AdminOrigin = crate::EnsureDexAccount<Test>;
-    type MaxSwapFee = MaxSwapFee;
-    type PoolSetupFee = ConstU128<0>;
-    type PoolSetupFeeAsset = NativeAsset;
-    type PoolSetupFeeTarget = ();
-    type LiquidityWithdrawalFee = LiquidityWithdrawalFee;
-    type MintMinLiquidity = ConstU128<{ MINIMUM_LIQUIDITY as u128 }>;
-    type MaxSwapPathLength = ConstU32<2>;
-    type PalletId = AssetConversionPalletId;
-    type WeightInfo = ();
-    #[cfg(feature = "runtime-benchmarks")]
-    type BenchmarkHelper = ();
-}
+crate::impl_base_pallet_for_mock!(Test, AccountId, u32, NativeAndAssets, NativeAsset);
 
 pub type NativeAndAssets = frame_support::traits::fungible::UnionOf<
     Balances,
@@ -252,11 +178,14 @@ impl Config for Test {
     type DefaultProtocolFeeRecipient = ExcessRecipient;
     type CreatorFeeRecipient = MockCreators;
     type TreasurySink = MockSink;
+    type Base = crate::AssetConversionAdapter<Test>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = MockBenchHelper;
 }
 
+// The benchmarks' world; the unit tests run on the runtime-like one.
+#[allow(dead_code)]
 pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     // Tests share a thread under `--test-threads=1`.
     ExistentialDeposit::set(1);
@@ -316,6 +245,8 @@ pub(crate) fn new_runtime_like_ext_before_upgrade() -> sp_io::TestExternalities 
     build_runtime_like_ext(false, false)
 }
 
+// For the tests that move to LP tokens next.
+#[allow(dead_code)]
 pub(crate) fn new_runtime_like_ext_from_genesis() -> sp_io::TestExternalities {
     build_runtime_like_ext(true, false)
 }
@@ -338,8 +269,16 @@ fn build_runtime_like_ext(dex_genesis: bool, upgraded: bool) -> sp_io::TestExter
         SINK_VAULT.with(|v| *v.borrow_mut() = None);
         SINK_NOTED.with(|n| n.borrow_mut().clear());
         if upgraded {
-            use frame_support::traits::UncheckedOnRuntimeUpgrade;
-            crate::migrations::v6::VersionUncheckedMigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
+            // What the upgrade does for the fee escrow: its ED, from the
+            // treasury's stand-in.
+            use frame_support::traits::fungible::Mutate as _;
+            Balances::transfer(
+                &UpgradeSource::get(),
+                &VitreusDex::fee_escrow_account(),
+                RUNTIME_ED,
+                frame_support::traits::tokens::Preservation::Preserve,
+            )
+            .unwrap();
             System::reset_events();
         }
     });
