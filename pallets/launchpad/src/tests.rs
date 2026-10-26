@@ -19,6 +19,10 @@ use std::borrow::Borrow;
 
 const SELLABLE: u128 = 800_000_000 * UNIT;
 const RESERVED: u128 = 200_000_000 * UNIT;
+/// What a graduation seeds of the reserved allocation: all but the launch
+/// token's minimum balance (one unit), which the base pallet leaves with the
+/// escrow rather than take its last unit.
+const SEEDED_TOKENS: u128 = RESERVED - 1;
 const RESCUE_DELAY: u64 = 100_800;
 
 fn native() -> NativeOrAssetId {
@@ -62,7 +66,10 @@ struct Position {
 }
 fn position(who: &Acc, id: LaunchId) -> Option<Position> {
     let shares = <Test as pallet_vitreus_dex::Config>::Base::lp_balance(&native(), &kind(id), who);
-    (shares > 0).then_some(Position { shares, locked_until: None })
+    (shares > 0).then_some(Position {
+        shares,
+        locked_until: pallet_vitreus_dex::LiquidityLocks::<Test>::get(pair(id), who),
+    })
 }
 fn lp_issuance(id: LaunchId) -> u128 {
     <Test as pallet_vitreus_dex::Config>::Base::lp_issuance(&native(), &kind(id))
@@ -282,7 +289,7 @@ fn lifecycle_happy_path() {
         // I7: pool opens at the curve's final price within 1e-6.
         let pool = pool_of(id);
         let (quote_seeded, tokens_seeded) = (pool.reserve_a, pool.reserve_b); // canonical: Native first
-        assert_eq!(tokens_seeded, RESERVED);
+        assert_eq!(tokens_seeded, SEEDED_TOKENS);
         let (pn, pd) = p_end(id);
         // |quote/tokens − pn/pd| / (pn/pd) ≤ 1e-6  ⇔  |quote·pd − tokens·pn| · 1e6 ≤ tokens·pn
         let lhs = U256::from(quote_seeded) * U256::from(pd);
@@ -301,11 +308,12 @@ fn lifecycle_happy_path() {
         assert_eq!(pos.locked_until, Some(u64::MAX));
         assert_eq!(pos.shares, s.lp_shares);
 
-        // Treasury got creation-fee surplus + protocol fees.
+        // Treasury got creation-fee surplus + protocol fees, and at
+        // graduation the ED creation set aside for the pool account.
         let s = state(id);
         assert_eq!(
             vtrs(TREASURY) - treasury_before,
-            s.protocol_fees_paid + (CREATION_FEE - 2 * ED - (100 + 2 * 4 + 2 * 4 + 10))
+            s.protocol_fees_paid + (CREATION_FEE - ED - (100 + 2 * 4 + 2 * 4 + 10))
         );
         assert!(has_event(|e| matches!(e, Event::Graduated { .. })));
     });
@@ -516,22 +524,24 @@ fn fm02_prefunded_pool_account_does_not_move_opening_price() {
         assert_eq!(state(id).phase, Phase::Graduated);
         let pool = pool_of(id);
         let raised = pool.reserve_a;
-        assert_eq!(pool.reserve_b, RESERVED);
-        // Live balances equal the stored amounts: nothing extra in the pool
-        // beyond the pool account's own ED, which is not a reserve.
-        assert_eq!(vtrs(&pa), raised + ED);
-        assert_eq!(tok(id, &pa), RESERVED);
-        // The native donation went to the DEX excess recipient, all but the
-        // first ED, which the pool account kept as its own; the token
-        // donation was burned.
-        assert_eq!(vtrs(EXCESS) - excess_before.0, 5 * UNIT - ED);
+        assert_eq!(pool.reserve_b, SEEDED_TOKENS);
+        // Nothing in the pool but the seed: the base pool keeps nothing of
+        // its own, so its whole balance is the reserve.
+        assert_eq!(vtrs(&pa), raised);
+        assert_eq!(tok(id, &pa), SEEDED_TOKENS);
+        // The native donation went to the DEX excess recipient, all of it;
+        // the token donation was burned.
+        assert_eq!(vtrs(EXCESS) - excess_before.0, 5 * UNIT);
         assert_eq!(tok(id, EXCESS) - excess_before.1, 0);
         assert_eq!(Assets::total_supply(asset_of(id)), 1_000_000_000 * UNIT - donated_tokens);
-        // First swap prices off the stored reserves (sync_reserves finds nothing extra).
+        // The first swap prices off the seed alone: what the tier leaves of
+        // the input against the seeded reserves, within the part per million
+        // the routed slices and the pool fee's rounding cost (a donation
+        // counted in would move it by about a thousand times that).
         let amount_in = 10 * UNIT;
         let after_fee = amount_in - amount_in * 3 / 1_000;
         let expected = u128::try_from(
-            U256::from(RESERVED) * U256::from(after_fee) / U256::from(raised + after_fee),
+            U256::from(SEEDED_TOKENS) * U256::from(after_fee) / U256::from(raised + after_fee),
         )
         .unwrap();
         let before = tok(id, DAVE);
@@ -540,10 +550,11 @@ fn fm02_prefunded_pool_account_does_not_move_opening_price() {
             native(),
             kind(id),
             amount_in,
-            expected,
+            1,
             DAVE
         ));
-        assert_eq!(tok(id, DAVE) - before, expected);
+        let got = tok(id, DAVE) - before;
+        assert!(got.abs_diff(expected) <= expected / 1_000_000, "{got} vs {expected}");
     });
 }
 
@@ -949,10 +960,10 @@ fn fm08_crossing_buy_partial_fill_and_deferred_seed() {
         assert_ok!(Launchpad::graduate(origin(CHARLIE), id));
         assert_eq!(state(id).phase, Phase::Graduated);
         let pool = pool_of(id);
-        assert_eq!((pool.reserve_a, pool.reserve_b), (raised, RESERVED));
+        assert_eq!((pool.reserve_a, pool.reserve_b), (raised, SEEDED_TOKENS));
         // (above the pool account's own ED, which is not a reserve)
         assert_eq!(vtrs(pool_account(id)), raised + ED);
-        assert_eq!(tok(id, pool_account(id)), RESERVED);
+        assert_eq!(tok(id, pool_account(id)), SEEDED_TOKENS);
     });
 }
 
@@ -1288,7 +1299,7 @@ fn fm11_seed_overflow_is_impossible() {
         assert_eq!(state(id).phase, Phase::Graduated);
         let pool = pool_of(id);
         assert!(pool.reserve_a > 2_999_000_000 * UNIT);
-        assert_eq!(pool.reserve_b, RESERVED);
+        assert_eq!(pool.reserve_b, SEEDED_TOKENS);
         assert!(lp_issuance(id) > u128::from(MINIMUM_LIQUIDITY));
     });
 }
@@ -1307,8 +1318,6 @@ fn fm11_every_complete_state_has_a_forward_path() {
                 routing: pallet_vitreus_dex::FeeRouting::default(),
             },
         );
-        // The ED pool creation gives every pool account.
-        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), pool_account(id), ED));
         // liquidity at roughly p_end so the rescue is within tolerance
         let (pn, pd) = p_end(id);
         let tokens = tok(id, BOB);
@@ -1348,7 +1357,7 @@ fn fm11_every_complete_state_has_a_forward_path() {
         );
         cross(BOB, id);
         assert_eq!(state(id).phase, Phase::Graduated);
-        assert_eq!(pool_of(id).reserve_b, RESERVED);
+        assert_eq!(pool_of(id).reserve_b, SEEDED_TOKENS);
     });
     // (c) excess recipient cannot receive → deferred, fixed, permissionless retry
     new_test_ext().execute_with(|| {

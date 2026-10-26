@@ -115,10 +115,10 @@ fn arm_worst_case_seed<T: Config>(id: LaunchId) -> (BalanceOf<T>, BalanceOf<T>) 
 }
 
 /// The sweep and the burn ran: the pool account holds exactly what the seed
-/// deposited (had the parked balances been absorbed instead, `sync_reserves`
-/// would have counted them and the pool would hold more), the excess
-/// recipient gained at least the parked native, and the parked launch token
-/// is gone from the supply.
+/// deposited (had the parked balances been absorbed instead, the pool would
+/// hold more, and its opening price would show it), the excess recipient
+/// gained at least the parked native, and the parked launch token is gone
+/// from the supply.
 ///
 /// The recipient side is a lower bound on purpose. In the real runtime
 /// `ExcessRecipient` and the launchpad's `Treasury` are the same account,
@@ -134,22 +134,21 @@ fn assert_swept<T: Config>(id: LaunchId, before: (BalanceOf<T>, BalanceOf<T>)) {
     let raise: BalanceOf<T> = curve::raise_at_sellout(&terms, T::Sellable::get().into())
         .expect("raise")
         .into();
-    // Above the pool account's own ED, which is not a reserve.
-    let ed =
-        <T::Currency as frame_support::traits::fungible::Inspect<T::AccountId>>::minimum_balance();
-    assert_eq!(
-        T::Currency::balance(&pool),
-        raise + ed,
-        "pool holds the raised VTRS and nothing parked"
-    );
-    assert_eq!(
-        T::LaunchAssets::balance(launch.asset_id, &pool),
-        Launchpad::<T>::reserved(),
+    // The base pool keeps nothing of its own: its whole balance is reserve.
+    assert_eq!(T::Currency::balance(&pool), raise, "pool holds the raised VTRS and nothing parked");
+    // The reserved supply, or all but the launch token's minimum balance
+    // where the escrow held no more than it (the base pallet leaves a
+    // depositor its last unit); either way none of what was parked.
+    let seeded = T::LaunchAssets::balance(launch.asset_id, &pool);
+    let reserved = Launchpad::<T>::reserved();
+    assert!(
+        seeded == reserved
+            || seeded == reserved - T::LaunchAssets::minimum_balance(launch.asset_id),
         "pool holds the reserved supply and nothing parked"
     );
     let excess = <T as pallet_vitreus_dex::Config>::ExcessRecipient::get();
-    // The parked VTRS, but for the first ED, which the pool account keeps.
-    assert!(T::Currency::balance(&excess) + ed >= before.0 + small_quote::<T>());
+    // All of the parked VTRS.
+    assert!(T::Currency::balance(&excess) >= before.0 + small_quote::<T>());
     assert!(T::LaunchAssets::balance(launch.asset_id, &excess) >= before.1);
     assert_eq!(
         T::LaunchAssets::total_issuance(launch.asset_id),

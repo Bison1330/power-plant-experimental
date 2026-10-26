@@ -3,12 +3,12 @@
 //! taken outside the pool. All on the runtime-like world.
 
 use crate::{
-    mock::*, AmmBase, CreatorFeesUnclaimed, Error, Event as DexEvent, FeeRouting, IntentSwap,
-    LastSwapBlock, PoolInfo, PoolManager, Pools, ProtocolFeesUnclaimed, ReservedPoolSeeder,
-    MINIMUM_LIQUIDITY,
+    mock::*, AmmBase, CreatorFeesUnclaimed, Error, Event as DexEvent, FeeRouting, FreezeReason,
+    IntentSwap, LastSwapBlock, LiquidityLocks, PoolInfo, PoolManager, Pools, ProtocolFeesUnclaimed,
+    ReservedPoolSeeder, SeedOutcome, MINIMUM_LIQUIDITY,
 };
 use frame_support::{assert_noop, assert_ok, traits::fungibles::Inspect};
-use sp_runtime::{traits::BadOrigin, DispatchError, Permill};
+use sp_runtime::{traits::BadOrigin, DispatchError, DispatchResult, Permill};
 
 fn native() -> NativeOrAssetId {
     NativeOrAssetId::Native
@@ -512,26 +512,198 @@ fn routed_fees_are_claimed_from_escrow() {
     });
 }
 
+fn lock_frozen(who: AccountId, a: NativeOrAssetId, b: NativeOrAssetId) -> u128 {
+    <Test as crate::Config>::Base::lp_frozen(&a, &b, &who, &FreezeReason::LiquidityLock.into())
+}
+fn seed_frozen(who: AccountId, a: NativeOrAssetId, b: NativeOrAssetId) -> u128 {
+    <Test as crate::Config>::Base::lp_frozen(&a, &b, &who, &FreezeReason::LaunchSeed.into())
+}
+fn remove(who: AccountId, a: NativeOrAssetId, b: NativeOrAssetId, lp: u128) -> DispatchResult {
+    VitreusDex::remove_liquidity(RuntimeOrigin::signed(who), a, b, lp, 0, 0)
+}
+
 #[test]
-fn locks_and_seeding_are_refused_until_they_move_to_freezes() {
+fn lock_holds_whole_position_until_its_block() {
     new_runtime_like_ext().execute_with(|| {
         assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
         add(ALICE, native(), usdc(), 1_000 * UNIT, 1_000 * UNIT);
         assert_noop!(
-            VitreusDex::lock_liquidity(RuntimeOrigin::signed(ALICE), native(), usdc(), 100),
-            Error::<Test>::Unavailable
+            VitreusDex::lock_liquidity(RuntimeOrigin::signed(BOB), native(), usdc(), 100),
+            Error::<Test>::InsufficientShares
         );
-        create_launch_asset();
+        let first = add(BOB, native(), usdc(), 10 * UNIT, 10 * UNIT);
+        assert_ok!(VitreusDex::lock_liquidity(RuntimeOrigin::signed(BOB), usdc(), native(), 100));
+        assert_eq!(LiquidityLocks::<Test>::get((native(), usdc()), BOB), Some(100));
+        assert_eq!(lock_frozen(BOB, native(), usdc()), first);
+        assert_noop!(remove(BOB, native(), usdc(), 1), Error::<Test>::PoolLocked);
+
+        // Added while the lock is in force: locked with the rest.
+        let more = add(BOB, native(), usdc(), 5 * UNIT, 5 * UNIT);
+        assert_eq!(lock_frozen(BOB, native(), usdc()), first + more);
+        assert_noop!(remove(BOB, native(), usdc(), more), Error::<Test>::PoolLocked);
+
+        // A lock only lengthens.
+        assert_noop!(
+            VitreusDex::lock_liquidity(RuntimeOrigin::signed(BOB), native(), usdc(), 99),
+            Error::<Test>::LockCannotBeShortened
+        );
+        assert_ok!(VitreusDex::lock_liquidity(RuntimeOrigin::signed(BOB), native(), usdc(), 120));
+
+        System::set_block_number(119);
+        assert_noop!(remove(BOB, native(), usdc(), 1), Error::<Test>::PoolLocked);
+        // From its block on, the next remove lifts it.
+        System::set_block_number(120);
+        assert_ok!(remove(BOB, native(), usdc(), first + more));
+        assert_eq!(LiquidityLocks::<Test>::get((native(), usdc()), BOB), None);
+        assert_eq!(lock_frozen(BOB, native(), usdc()), 0);
+        // An add after it is unlocked liquidity.
+        let later = add(BOB, native(), usdc(), UNIT, UNIT);
+        assert_ok!(remove(BOB, native(), usdc(), later));
+        assert_ok!(VitreusDex::do_try_state());
+    });
+}
+
+#[test]
+fn lock_to_last_block_is_for_good() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        add(ALICE, native(), usdc(), 1_000 * UNIT, 1_000 * UNIT);
+        let lp = add(BOB, native(), usdc(), 10 * UNIT, 10 * UNIT);
+        assert_ok!(VitreusDex::lock_liquidity(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            usdc(),
+            u64::MAX
+        ));
+        System::set_block_number(u64::MAX - 1);
+        assert_noop!(remove(BOB, native(), usdc(), lp), Error::<Test>::PoolLocked);
+        assert_noop!(
+            <VitreusDex as PoolManager<_, _, _, _>>::lock_liquidity_for(&BOB, native(), usdc(), 5),
+            Error::<Test>::LockCannotBeShortened
+        );
+    });
+}
+
+/// CHARLIE as a launch's escrow at graduation: exactly `tokens` of the
+/// launch token, and plenty of native.
+fn seeder_with(tokens: u128) -> AccountId {
+    assert_ok!(Assets::force_create(RuntimeOrigin::root(), LAUNCH_ID, ALICE, false, 1));
+    assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, CHARLIE, tokens));
+    CHARLIE
+}
+fn seed(who: AccountId, tokens: u128, quote: u128) -> Result<SeedOutcome<u128>, DispatchError> {
+    <VitreusDex as ReservedPoolSeeder<_, _, _, _>>::seed_reserved_pool_for(
+        &who,
+        launch(),
+        native(),
+        tokens,
+        quote,
+        3,
+    )
+}
+
+#[test]
+fn seed_clears_pool_address_deposits_and_freezes_for_good() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 10, 5, 5));
+        let tokens = 200_000_000 * UNIT;
+        let quote = 3_000 * UNIT;
+        let escrow = seeder_with(tokens);
+        // Donations parked at the pool address before the seed.
+        let pool = pool_account(native(), launch());
+        assert_ok!(Balances::transfer_allow_death(RuntimeOrigin::signed(DAVE), pool, 7 * UNIT));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, pool, 5 * UNIT));
+        let treasury = balance(native(), TREASURY);
+
+        let out = seed(escrow, tokens, quote).unwrap();
+        // The quote whole; the token less the unit the escrow keeps.
+        assert_eq!(out.quote_seeded, quote);
+        assert_eq!(out.asset_seeded, tokens - 1);
+        assert_eq!(balance(launch(), escrow), 1);
+        // The donations did not reach the opening price: swept and burned.
+        assert_eq!(balance(native(), pool), quote);
+        assert_eq!(balance(launch(), pool), tokens - 1);
+        assert_eq!(balance(native(), TREASURY) - treasury, 7 * UNIT);
+        // The full default split, and the escrow's LP tokens frozen for good.
+        let record = Pools::<Test>::get((native(), launch())).unwrap();
         assert_eq!(
+            record.routing,
+            FeeRouting { protocol_bps: 10, creator_bps: 5, treasury_bps: 5 }
+        );
+        assert_eq!(lp_of(native(), launch(), escrow), out.shares);
+        assert_eq!(seed_frozen(escrow, native(), launch()), out.shares);
+        assert_noop!(remove(escrow, native(), launch(), 1), Error::<Test>::PoolLocked);
+        // Locked to the last block, as seed positions always were: no lock
+        // can shorten it, and no block reaches it.
+        assert_eq!(LiquidityLocks::<Test>::get((native(), launch()), escrow), Some(u64::MAX));
+        assert_noop!(
+            VitreusDex::lock_liquidity(RuntimeOrigin::signed(escrow), native(), launch(), 5),
+            Error::<Test>::LockCannotBeShortened
+        );
+        System::set_block_number(u64::MAX - 1);
+        assert_noop!(remove(escrow, native(), launch(), 1), Error::<Test>::PoolLocked);
+        assert_eq!(seed_frozen(escrow, native(), launch()), out.shares);
+
+        // Once only.
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, escrow, tokens));
+        assert_noop!(seed(escrow, tokens, quote), Error::<Test>::PoolAlreadySeeded);
+        assert_ok!(VitreusDex::do_try_state());
+    });
+}
+
+#[test]
+fn seed_is_refused_where_it_cannot_be_what_it_promises() {
+    new_runtime_like_ext().execute_with(|| {
+        let tokens = 1_000 * UNIT;
+        let escrow = seeder_with(tokens);
+        // No default split for the tier: deferred, not graduated at zero.
+        assert_noop!(seed(escrow, tokens, UNIT), Error::<Test>::NoDefaultFeeRouting);
+        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 10, 5, 5));
+        // Not a reserved asset, or a reserved quote.
+        assert_noop!(
             <VitreusDex as ReservedPoolSeeder<_, _, _, _>>::seed_reserved_pool_for(
-                &ALICE,
-                launch(),
+                &escrow,
+                usdc(),
                 native(),
                 UNIT,
                 UNIT,
                 3
             ),
-            Err(DispatchError::from(Error::<Test>::Unavailable))
+            Error::<Test>::NotReservedAsset
+        );
+        // More than the seeder holds, by more than its kept minimum.
+        assert_noop!(seed(escrow, tokens + 2, UNIT), Error::<Test>::InsufficientInitialLiquidity);
+        // A record at another tier.
+        Pools::<Test>::insert(
+            (native(), launch()),
+            PoolInfo { fee_tier: 10, total_fees_collected: 0, routing: FeeRouting::default() },
+        );
+        assert_noop!(seed(escrow, tokens, UNIT), Error::<Test>::InvalidFeeTier);
+    });
+}
+
+#[test]
+fn seed_whose_sweep_cannot_land_fails_loudly() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 10, 0, 0));
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), LAUNCH_ID, ALICE, false, 1));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, CHARLIE, 1_000 * UNIT));
+        // A non-native quote parked at the pool address, and an excess
+        // recipient that cannot open an account for it.
+        let pool = pool_account(usdc(), launch());
+        assert_ok!(Balances::transfer_allow_death(RuntimeOrigin::signed(DAVE), pool, UNIT));
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(DAVE), USDC_ID, pool, UNIT));
+        while System::inc_consumers(&TREASURY).is_ok() {}
+        assert_noop!(
+            <VitreusDex as ReservedPoolSeeder<_, _, _, _>>::seed_reserved_pool_for(
+                &CHARLIE,
+                launch(),
+                usdc(),
+                1_000 * UNIT,
+                1_000 * UNIT,
+                3
+            ),
+            Error::<Test>::ExcessRecipientCannotReceive
         );
     });
 }
@@ -685,5 +857,119 @@ fn intent_swap_can_spend_whole_token_balance() {
             Ok(quoted)
         );
         assert_eq!(balance(usdc(), CHARLIE), 0);
+    });
+}
+
+#[test]
+fn add_takes_pools_ratio_and_answers_in_our_errors() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        add(ALICE, native(), usdc(), 777 * UNIT + 13, 1_301 * UNIT + 7);
+        let pool = pool_account(native(), usdc());
+        for (x, y) in [(UNIT, 1_000 * UNIT), (1_000 * UNIT, 3 * UNIT + 1), (5_000, 9_000)] {
+            let (rn, ru) = (balance(native(), pool), balance(usdc(), pool));
+            // Whichever side binds, the other is the floor of the ratio.
+            let (tn, tu) = if mul_div(x, ru, rn) <= y {
+                (x, mul_div(x, ru, rn))
+            } else {
+                (mul_div(y, rn, ru), y)
+            };
+            // Minting no more than the locked minimum is too little to record.
+            let issuance = <Test as crate::Config>::Base::lp_issuance(&native(), &usdc());
+            if mul_div(tn, issuance, rn).min(mul_div(tu, issuance, ru)) <= MINIMUM_LIQUIDITY as u128
+            {
+                assert_noop!(
+                    VitreusDex::add_liquidity(
+                        RuntimeOrigin::signed(BOB),
+                        native(),
+                        usdc(),
+                        x,
+                        y,
+                        0,
+                        0
+                    ),
+                    Error::<Test>::ZeroAmount
+                );
+                continue;
+            }
+            assert_noop!(
+                VitreusDex::add_liquidity(
+                    RuntimeOrigin::signed(BOB),
+                    native(),
+                    usdc(),
+                    x,
+                    y,
+                    tn + 1,
+                    0
+                ),
+                Error::<Test>::SlippageExceeded
+            );
+            assert_noop!(
+                VitreusDex::add_liquidity(
+                    RuntimeOrigin::signed(BOB),
+                    native(),
+                    usdc(),
+                    x,
+                    y,
+                    0,
+                    tu + 1
+                ),
+                Error::<Test>::SlippageExceeded
+            );
+            assert_ok!(VitreusDex::add_liquidity(
+                RuntimeOrigin::signed(BOB),
+                native(),
+                usdc(),
+                x,
+                y,
+                tn,
+                tu
+            ));
+            assert_eq!((balance(native(), pool) - rn, balance(usdc(), pool) - ru), (tn, tu));
+        }
+        // A ratio past what a balance can hold is ours to refuse.
+        assert_noop!(
+            VitreusDex::add_liquidity(
+                RuntimeOrigin::signed(BOB),
+                native(),
+                usdc(),
+                u128::MAX,
+                UNIT,
+                0,
+                0
+            ),
+            Error::<Test>::Overflow
+        );
+    });
+}
+
+#[test]
+fn whole_balance_offered_gives_all_but_minimum() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), usdc(), 3));
+        add(ALICE, native(), usdc(), 500 * UNIT, 1_000 * UNIT);
+        let all = balance(usdc(), BOB);
+        // Short by exactly the minimum: it keeps that and adds the rest.
+        assert_ok!(VitreusDex::add_liquidity(
+            RuntimeOrigin::signed(BOB),
+            usdc(),
+            native(),
+            all,
+            u128::MAX / 4,
+            0,
+            0
+        ));
+        assert_eq!(balance(usdc(), BOB), 1);
+        // Short by more: it fails on its funds, as a transfer would.
+        assert!(VitreusDex::add_liquidity(
+            RuntimeOrigin::signed(BOB),
+            usdc(),
+            native(),
+            2,
+            UNIT,
+            0,
+            0
+        )
+        .is_err());
     });
 }

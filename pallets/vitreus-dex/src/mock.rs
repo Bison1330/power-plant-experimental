@@ -38,6 +38,8 @@ impl frame_system::Config for Test {
 #[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
 impl pallet_balances::Config for Test {
     type Balance = u128;
+    // The DEX freezes LP tokens; balances shares the runtime's freeze reasons.
+    type MaxFreezes = frame_support::traits::VariantCountOf<RuntimeFreezeReason>;
     type ExistentialDeposit = ExistentialDeposit;
     type AccountStore = System;
 }
@@ -178,7 +180,8 @@ impl Config for Test {
     type DefaultProtocolFeeRecipient = ExcessRecipient;
     type CreatorFeeRecipient = MockCreators;
     type TreasurySink = MockSink;
-    type Base = crate::AssetConversionAdapter<Test>;
+    type Base = crate::AssetConversionAdapter<Test, PoolAssetsFreezer>;
+    type RuntimeFreezeReason = RuntimeFreezeReason;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = MockBenchHelper;

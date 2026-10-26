@@ -661,8 +661,8 @@ pub mod pallet {
                 &escrow,
             )?;
             // 5. whatever the escrow can spare above ED (and above reserved deposits) goes to
-            //    treasury, less one more ED set aside for the pool account, which its first
-            //    deposit — the seed — endows (`MinCreationFee` covers both).
+            //    treasury, less one more ED set aside, which graduation sends to the treasury
+            //    too (`MinCreationFee` covers both; see `do_seed`).
             let pool_ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
             let spare =
                 T::Currency::reducible_balance(&escrow, Preserve, Polite).saturating_sub(pool_ed);
@@ -1415,7 +1415,7 @@ pub mod pallet {
             let state = Curves::<T>::get(launch_id).ok_or(Error::<T>::LaunchNotFound)?;
             ensure!(state.phase == Phase::Complete, Error::<T>::WrongPhase);
             let reserved = Self::reserved();
-            let shares = T::Dex::seed_reserved_pool_for(
+            let seeded = T::Dex::seed_reserved_pool_for(
                 &launch.escrow,
                 T::IntoAssetKind::convert(launch.asset_id),
                 T::NativeAssetKind::get(),
@@ -1423,6 +1423,19 @@ pub mod pallet {
                 state.real_quote,
                 launch.curve.pool_fee_tier,
             )?;
+            let shares = seeded.shares;
+            // Creation set an ED aside for the pool account to keep as its
+            // own. The base pool keeps nothing of its own (its whole balance
+            // is reserve, so that ED would move the opening price), so it
+            // goes to the treasury. Never the creator's unclaimed fees, and
+            // nothing where a launch set nothing aside.
+            let pool_ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
+            let spare = T::Currency::reducible_balance(&launch.escrow, Preserve, Polite)
+                .saturating_sub(state.creator_fees_unclaimed);
+            let set_aside = pool_ed.min(spare);
+            if !set_aside.is_zero() {
+                T::Currency::transfer(&launch.escrow, &T::Treasury::get(), set_aside, Preserve)?;
+            }
             let now = frame_system::Pallet::<T>::block_number();
             Curves::<T>::mutate(launch_id, |maybe| {
                 if let Some(c) = maybe {
@@ -1434,8 +1447,8 @@ pub mod pallet {
             });
             Self::deposit_event(Event::Graduated {
                 launch_id,
-                quote_seeded: state.real_quote,
-                tokens_seeded: reserved,
+                quote_seeded: seeded.quote_seeded,
+                tokens_seeded: seeded.asset_seeded,
                 shares,
             });
             Ok(())
