@@ -653,7 +653,8 @@ pub mod pallet {
             let pool_account = pallet_vitreus_dex::Pallet::<T>::pool_account_for(
                 T::NativeAssetKind::get(),
                 asset_kind.clone(),
-            );
+            )
+            .ok_or(pallet_vitreus_dex::Error::<T>::PoolNotFound)?;
             <<T as pallet_vitreus_dex::Config>::Assets as AccountTouch<_, _>>::touch(
                 asset_kind.clone(),
                 &pool_account,
