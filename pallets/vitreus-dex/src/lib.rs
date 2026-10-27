@@ -2229,13 +2229,10 @@ pub mod migrations {
     use sp_std::marker::PhantomData;
 
     /// v4 → v7: the DEX core moves onto the base pallet. The single-pool
-    /// core's storage is cleared, not converted: no chain the upgrade
-    /// reaches has a pool to carry over (testnet has none; the dev chain
-    /// starts from a new genesis), and a pool that did exist would lose its
-    /// record while its pool account kept the funds, with no call left that
-    /// moves them — which is why testnet must not create a pool or graduate
-    /// a launch before this upgrade. What is dropped is logged, each pool
-    /// with its id and account.
+    /// core's storage is cleared, not converted, so it may only run on a
+    /// chain with no pools: a pool that did exist would lose its record
+    /// while its pool account kept the funds, with no call left that moves
+    /// them. What is dropped is logged, each pool with its id and account.
     ///
     /// Also carried: v5's removal of the solver marketplace's items (a chain
     /// at v4 never ran it; list this migration alone, not v5 as well), and

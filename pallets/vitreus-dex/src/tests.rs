@@ -2542,9 +2542,9 @@ fn migration_v7_runs_only_on_v4_chain() {
     });
 }
 
-/// Testnet's whole `VitreusDex` storage at block 13_408_262 (spec 215),
-/// exported raw: tier 3's default split, and storage version 4. No pool,
-/// position or fee; its fee escrow held nothing.
+/// A live chain's whole `VitreusDex` storage, exported raw: tier 3's
+/// default split, and storage version 4. No pool, position or fee; its fee
+/// escrow held nothing.
 const TESTNET_DEX_STORAGE: [(&str, &str); 2] = [
     (
         "ce14eba2a7fea92eb5298d5a9e3cf30a0155e5add1f2cc8b1e913cc30b281729bfb27f1eaef06bb903000000",
