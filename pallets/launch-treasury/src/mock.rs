@@ -113,6 +113,8 @@ parameter_types! {
 
 impl pallet_assets::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type Holder = ();
+    type ReserveData = ();
     type Balance = u128;
     type RemoveItemsLimit = ConstU32<1000>;
     type AssetId = u128;
@@ -137,10 +139,11 @@ impl pallet_assets::Config for Test {
 
 pallet_assets::runtime_benchmarks_enabled! {
     pub struct AssetsBenchmarkHelper;
-    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>> for AssetsBenchmarkHelper {
+    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>, ()> for AssetsBenchmarkHelper {
         fn create_asset_id_parameter(id: u32) -> parity_scale_codec::Compact<u128> {
             parity_scale_codec::Compact(id.into())
         }
+        fn create_reserve_id_parameter(_: u32) {}
     }
 }
 
@@ -179,7 +182,6 @@ impl pallet_vitreus_dex::CreatorFeeRecipient<NativeOrAssetId, Acc> for Launchpad
 }
 
 impl pallet_vitreus_dex::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type ManageOrigin = EnsureRoot<Acc>;
     type Balance = u128;
     type HigherPrecisionBalance = sp_core::U256;
@@ -252,7 +254,6 @@ impl OnCurveBuy<Acc, u128, u64> for PassHook {
 }
 
 impl pallet_launchpad::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type LaunchManageOrigin = EnsureRoot<Acc>;
     type AssetId = u128;
     type Currency = Balances;
@@ -604,7 +605,6 @@ parameter_types! {
 }
 
 impl pallet_launch_treasury::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type TreasuryManageOrigin = EnsureRoot<Acc>;
     type Staking = MockStaking;
     type Exchange = MockBroker;
@@ -686,7 +686,7 @@ fn build_ext(vault_funded: bool) -> sp_io::TestExternalities {
         // The broker holds the gas market's VTRS float (§3.2).
         (BROKER, 1_000_000 * UNIT),
     ];
-    pallet_balances::GenesisConfig::<Test> { balances }
+    pallet_balances::GenesisConfig::<Test> { dev_accounts: None, balances }
         .assimilate_storage(&mut t)
         .unwrap();
     pallet_assets::GenesisConfig::<Test> {
@@ -732,5 +732,11 @@ fn build_ext(vault_funded: bool) -> sp_io::TestExternalities {
             vec![VAL_A, VAL_B]
         ));
     });
+    // Commit the setup, so it is part of the state the world starts from. A
+    // benchmark with a component runs once per value, and between runs the
+    // harness drops every change not committed: uncommitted, the fee
+    // routing, targets and vault funding above existed for the first run
+    // only, and the second run's graduation failed with NoDefaultFeeRouting.
+    ext.commit_all().expect("commit the test world's setup");
     ext
 }

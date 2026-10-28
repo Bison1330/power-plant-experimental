@@ -79,6 +79,8 @@ parameter_types! {
 
 impl pallet_assets::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type Holder = ();
+    type ReserveData = ();
     type Balance = u128;
     type RemoveItemsLimit = ConstU32<1000>;
     type AssetId = u128;
@@ -107,10 +109,11 @@ impl pallet_assets::Config for Test {
 // unification can switch it on from a sibling crate in the same `cargo test`).
 pallet_assets::runtime_benchmarks_enabled! {
     pub struct AssetsBenchmarkHelper;
-    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>> for AssetsBenchmarkHelper {
+    impl pallet_assets::BenchmarkHelper<parity_scale_codec::Compact<u128>, ()> for AssetsBenchmarkHelper {
         fn create_asset_id_parameter(id: u32) -> parity_scale_codec::Compact<u128> {
             parity_scale_codec::Compact(id.into())
         }
+        fn create_reserve_id_parameter(_: u32) {}
     }
 }
 
@@ -173,7 +176,6 @@ impl pallet_vitreus_dex::CreatorFeeRecipient<NativeOrAssetId, Acc> for Launchpad
 }
 
 impl pallet_vitreus_dex::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type ManageOrigin = EnsureRoot<Acc>;
     type Balance = u128;
     type HigherPrecisionBalance = sp_core::U256;
@@ -210,6 +212,7 @@ impl pallet_utility::Config for Test {
     PartialOrd,
     Encode,
     Decode,
+    DecodeWithMemTracking,
     RuntimeDebug,
     MaxEncodedLen,
     TypeInfo,
@@ -227,6 +230,7 @@ impl InstanceFilter<RuntimeCall> for ProxyType {
 
 impl pallet_proxy::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type BlockNumberProvider = frame_system::Pallet<Test>;
     type RuntimeCall = RuntimeCall;
     type Currency = Balances;
     type ProxyType = ProxyType;
@@ -242,6 +246,7 @@ impl pallet_proxy::Config for Test {
 
 impl pallet_multisig::Config for Test {
     type RuntimeEvent = RuntimeEvent;
+    type BlockNumberProvider = frame_system::Pallet<Test>;
     type RuntimeCall = RuntimeCall;
     type Currency = Balances;
     type DepositBase = ConstU128<ED>;
@@ -339,7 +344,6 @@ impl OnCurveBuy<Acc, u128, u64> for RecordingHook {
 }
 
 impl pallet_launchpad::Config for Test {
-    type RuntimeEvent = RuntimeEvent;
     type LaunchManageOrigin = EnsureRoot<Acc>;
     type AssetId = u128;
     type Currency = Balances;
@@ -375,6 +379,7 @@ pub const RICH: u128 = 1_000_000_000 * UNIT;
 pub fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default().build_storage().unwrap();
     pallet_balances::GenesisConfig::<Test> {
+        dev_accounts: None,
         balances: vec![
             (ALICE, RICH),
             (BOB, RICH),

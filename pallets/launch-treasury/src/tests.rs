@@ -1435,8 +1435,7 @@ fn r4_dust_in_pending_burn_bricks_compound_for_an_active_launch() {
         let r = compound(a);
         assert!(
             r == Err(Error::<Test>::NothingToDo.into()) || r.is_ok(),
-            "an unquotable slice is not an error of compound; got {:?}",
-            r
+            "an unquotable slice is not an error of compound; got {r:?}"
         );
         // And once there is something to sell, the sale must go through with
         // the dust still there.
@@ -1674,7 +1673,7 @@ fn r8_a_sale_never_asks_for_the_vaults_whole_lnrg() {
         pay_rewards(shares * 3);
         run_to(now() + BURN_INTERVAL);
         let r = compound(a);
-        assert!(r.is_ok(), "the sale must fit what the vault can part with: {:?}", r);
+        assert!(r.is_ok(), "the sale must fit what the vault can part with: {r:?}");
         assert_eq!(lnrg(vault()), 1, "the asset's min balance stays");
         assert_eq!(treasury(a).lnrg_accrued, 1, "and is still the launch's");
         ok_state();
@@ -1705,7 +1704,7 @@ fn r9_a_swap_of_ones_whole_balance_keeps_the_ed_instead_of_failing() {
             0,
             dave,
         );
-        assert!(r.is_ok(), "a swap of everything above the ED: {:?}", r);
+        assert!(r.is_ok(), "a swap of everything above the ED: {r:?}");
         assert_eq!(vtrs(dave), ED, "the ED stays");
         assert!(tok(a, dave) > 0, "and the tokens arrived");
         // The ED itself: refused up front with the same answer the curve gives,
@@ -1725,8 +1724,7 @@ fn r9_a_swap_of_ones_whole_balance_keeps_the_ed_instead_of_failing() {
                     sp_runtime::TokenError::Frozen | sp_runtime::TokenError::NotExpendable
                 ))
             ),
-            "the ED cannot be spent, said up front: {:?}",
-            r
+            "the ED cannot be spent, said up front: {r:?}"
         );
         assert_eq!(vtrs(dave), ED, "and nothing moved");
     });
@@ -1755,7 +1753,7 @@ fn finding14_a_sub_ed_routed_slice_does_not_fail_the_swap() {
             0,
             dave,
         );
-        assert!(r.is_ok(), "a sub-ED routed slice must not fail the swap: {:?}", r);
+        assert!(r.is_ok(), "a sub-ED routed slice must not fail the swap: {r:?}");
         assert!(tok(a, dave) > 0, "and the buyer got tokens");
     });
 }
@@ -1791,7 +1789,7 @@ fn r11_selling_ones_whole_token_position_goes_through() {
             0,
             dave,
         );
-        assert!(r.is_ok(), "the whole position sells: {:?}", r);
+        assert!(r.is_ok(), "the whole position sells: {r:?}");
         assert_eq!(tok(a, dave), 0, "nothing left");
         assert!(vtrs(dave) > before, "and the VTRS arrived");
     });
@@ -1822,8 +1820,7 @@ fn r10_a_swap_that_would_deliver_nothing_says_so() {
         assert_eq!(
             r,
             Err(pallet_vitreus_dex::Error::<Test>::ZeroAmount.into()),
-            "nothing would be delivered: {:?}",
-            r
+            "nothing would be delivered: {r:?}"
         );
         assert_eq!(vtrs(dave), UNIT, "and nothing moved");
     });

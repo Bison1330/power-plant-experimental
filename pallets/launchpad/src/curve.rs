@@ -278,18 +278,9 @@ mod unit {
         let short = target - r;
         assert!(
             short * 1_000_000_000 <= target * 2,
-            "raise {} vs target {} (short {})",
-            r,
-            target,
-            short
+            "raise {r} vs target {target} (short {short})"
         );
-        assert!(
-            short * 1_000_000_000 >= target,
-            "raise {} vs target {} (short {})",
-            r,
-            target,
-            short
-        );
+        assert!(short * 1_000_000_000 >= target, "raise {r} vs target {target} (short {short})");
     }
 
     #[test]

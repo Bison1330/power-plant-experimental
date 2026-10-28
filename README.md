@@ -50,22 +50,32 @@ own pallets (power-plant's are `EnergyGenerationStaking` and `EnergyBrokerExchan
 No crate here depends on a runtime trait crate.
 
 Wire crates into the testnet runtime only (`testnet-runtime` / equivalent). A fix to a pallet
-is a commit here and a pin bump in the consumer; nothing is patched in a consumer.
+is a commit here and a pin bump in the consumer, never a patch to the pallet in the consumer.
+
+At this commit a consumer needs no `[patch]`: none of the three pallets depends on
+`pallet-asset-conversion`, so the vendored crate is built here and nowhere else. Once the DEX core is
+built on `pallet-asset-conversion`, a consumer that takes the pallets also applies this workspace's
+`[patch]` for it (see Dependency alignment).
 
 ## Dependency alignment
 
 `[workspace.dependencies]` names polkadot-sdk as `git = "https://github.com/paritytech/polkadot-sdk",
-branch = "stable2407"` — the same strings as `power-plant`'s `Cargo.toml` — and `Cargo.lock` resolves
-it to the same commit. Cargo unifies a git dependency between this workspace and a consumer only when
-the source strings match exactly; a `rev` or `tag` here against a `branch` there would give the
-consumer two `frame-support`s and a type error at every `Config` boundary. When `power-plant` moves
-its lock, move this one to the same commit.
+tag = "polkadot-stable2512-8"` — the strings `power-plant`'s `Cargo.toml` must use too — and
+`Cargo.lock` resolves it to the same commit. Cargo unifies a git dependency between this workspace and
+a consumer only when the source strings match exactly; a `branch` or `rev` there against the `tag` here
+would give the consumer two `frame-support`s and a type error at every `Config` boundary. When
+`power-plant` moves its SDK, move this one to the same tag. `pallet-asset-conversion` is vendored from
+a later release and patched in by name (`vendor/pallet-asset-conversion/VENDORED.md`). No pallet here
+depends on it yet, so a consumer needs no `[patch]` at this commit. Once the DEX core is built on it, a
+consumer applies the same `[patch]`; without it, the consumer resolves the 2512 release's
+`pallet-asset-conversion` instead of the vendored one.
 
 ## Developing
 
 ```bash
 cargo test --workspace --locked
 cargo check --workspace --locked --features runtime-benchmarks
+cargo test --workspace --locked --features runtime-benchmarks   # the mocks and benchmark tests with the feature on
 cargo fmt --all -- --check
 PROPTEST_CASES=5000 cargo test --release -p pallet-launch-treasury --lib fuzz   # the property harness; 32 cases in plain `cargo test`
 ```

@@ -239,9 +239,7 @@ fn lifecycle_happy_path() {
         let t = T_DEFAULT;
         assert!(
             quote_seeded <= t && t - quote_seeded <= t / 100_000_000,
-            "raise {} vs T {}",
-            quote_seeded,
-            t
+            "raise {quote_seeded} vs T {t}"
         );
 
         // Position: escrow, locked forever.
@@ -1555,7 +1553,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
         // Pre-dispatch, `buy` is always charged the crossing path.
         let call: RuntimeCall =
             crate::Call::<Test>::buy { launch_id: id, quote_in: 1, min_tokens_out: 0 }.into();
-        assert_eq!(call.get_dispatch_info().weight, <() as W>::buy_crossing());
+        assert_eq!(call.get_dispatch_info().call_weight, <() as W>::buy_crossing());
         assert!(<() as W>::buy_crossing().all_gt(<() as W>::buy()));
 
         // A buy that leaves tokens on the curve refunds down to `buy()`.
@@ -1580,7 +1578,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
         }
         .into();
         assert_eq!(
-            call.get_dispatch_info().weight,
+            call.get_dispatch_info().call_weight,
             <() as W>::create_launch(4, 4, 0, 0).saturating_add(<() as W>::buy_crossing())
         );
         let post = Launchpad::create_launch(
@@ -1610,7 +1608,7 @@ fn weights_crossing_buy_refunds_when_not_crossing() {
             metadata: None,
         }
         .into();
-        assert_eq!(call.get_dispatch_info().weight, <() as W>::create_launch(4, 4, 0, 0));
+        assert_eq!(call.get_dispatch_info().call_weight, <() as W>::create_launch(4, 4, 0, 0));
         let post = Launchpad::create_launch(
             origin(CHARLIE),
             bv(b"Meme"),
