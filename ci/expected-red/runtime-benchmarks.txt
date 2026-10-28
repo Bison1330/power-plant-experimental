@@ -1,5 +1,5 @@
 # Tests expected to fail under `cargo test --workspace --features runtime-benchmarks`,
-# as `<crate> <test>`. scripts/test-red-set.sh fails CI when a test fails
+# as `<crate> <test>`. .github/scripts/test-red-set.sh fails CI when a test fails
 # that is not listed here, or when a listed test passes: the list only
 # changes in a commit that says why. Expected: the solver marketplace's 22 alone,
 # until its own fixes land.

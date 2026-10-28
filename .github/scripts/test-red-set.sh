@@ -5,15 +5,15 @@
 # listed test passes or no longer runs (it shrank: take it off the list in
 # the same commit). Fails on a build error, which leaves no test to compare.
 #
-#   scripts/test-red-set.sh try-runtime
-#   scripts/test-red-set.sh runtime-benchmarks
+#   .github/scripts/test-red-set.sh try-runtime
+#   .github/scripts/test-red-set.sh runtime-benchmarks
 #
 # RED_SET_LOG=<file> compares a saved `cargo test` log instead of running
 # the tests, and RED_SET_EXPECTED=<file> another list (to test this script).
 set -uo pipefail
 
-feature="${1:?usage: scripts/test-red-set.sh <feature>}"
-root="$(cd "$(dirname "$0")/.." && pwd)"
+feature="${1:?usage: .github/scripts/test-red-set.sh <feature>}"
+root="$(cd "$(dirname "$0")/../.." && pwd)"
 expected="${RED_SET_EXPECTED:-$root/ci/expected-red/$feature.txt}"
 [ -f "$expected" ] || { echo "no expected-red list for $feature at $expected" >&2; exit 2; }
 
