@@ -8,7 +8,7 @@
 # Cargo.toml, rustfmt.toml and UPSTREAM are ours and are not compared.
 set -euo pipefail
 
-root=$(cd "$(dirname "$0")/.." && pwd)
+root=$(cd "$(dirname "$0")/../.." && pwd)
 vendored=$root/vendor/pallet-asset-conversion
 patch=$root/vendor/pallet-asset-conversion.genesis.patch
 

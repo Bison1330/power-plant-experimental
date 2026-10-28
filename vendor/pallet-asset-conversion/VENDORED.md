@@ -13,7 +13,7 @@ the pool fixes and per-pool fees; the rest of the SDK stays on 2512.
 | `rustfmt.toml` | ours: turns `cargo fmt` off for upstream code | no |
 | `UPSTREAM` | ours: repository, tag, commit, path | no (it is the input) |
 
-`scripts/check-vendored.sh` runs as the first CI step. It fails if the tag no
+`.github/scripts/check-vendored.sh` runs as the first CI step. It fails if the tag no
 longer resolves to the recorded commit, if `src/` or `README.md` differ from
 that commit's with the patch applied, or if `Cargo.toml` names a dependency
 upstream's manifest does not (or misses one it does).
@@ -118,4 +118,4 @@ To move to a later upstream tag: set `tag` and `commit` in `UPSTREAM`, copy
 that commit's `src/` and `README.md` here, apply the genesis patch (refresh it
 if it no longer applies; it should touch only the genesis config), bring
 `Cargo.toml`'s version, dependencies and features and the lint table in line
-with upstream's, and run `scripts/check-vendored.sh`.
+with upstream's, and run `.github/scripts/check-vendored.sh`.

@@ -1,7 +1,7 @@
 # Written by hand; the only file here that is not upstream's. src/ and
 # README.md are polkadot-sdk's substrate/frame/asset-conversion at the tag in
 # UPSTREAM plus ../pallet-asset-conversion.genesis.patch, and CI fails if
-# they differ (scripts/check-vendored.sh). Upstream's manifest inherits from
+# they differ (.github/scripts/check-vendored.sh). Upstream's manifest inherits from
 # the polkadot-sdk workspace, so this one restates it against ours: the same
 # version, the same dependencies and features, and the SDK's lint table
 # copied below instead of inherited.
