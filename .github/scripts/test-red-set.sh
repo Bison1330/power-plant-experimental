@@ -27,6 +27,9 @@ else
     cargo test --workspace --locked --no-fail-fast --features "$feature" 2>&1 | tee "$work/log" >/dev/null
     status=${PIPESTATUS[0]}
 fi
+# CI sets CARGO_TERM_COLOR=always, which puts colour codes between "Running"
+# and "unittests"; without this every failure loses its crate name.
+sed -i 's/\x1b\[[0-9;]*[A-Za-z]//g' "$work/log"
 
 if grep -q '^error: could not compile' "$work/log"; then
     grep -B2 -A12 '^error' "$work/log" | head -60
