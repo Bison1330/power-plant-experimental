@@ -50,7 +50,12 @@ own pallets (power-plant's are `EnergyGenerationStaking` and `EnergyBrokerExchan
 No crate here depends on a runtime trait crate.
 
 Wire crates into the testnet runtime only (`testnet-runtime` / equivalent). A fix to a pallet
-is a commit here and a pin bump in the consumer; nothing is patched in a consumer.
+is a commit here and a pin bump in the consumer, never a patch to the pallet in the consumer.
+
+At this commit a consumer needs no `[patch]`: none of the three pallets depends on
+`pallet-asset-conversion`, so the vendored crate is built here and nowhere else. Once the DEX core is
+built on `pallet-asset-conversion`, a consumer that takes the pallets also applies this workspace's
+`[patch]` for it (see Dependency alignment).
 
 ## Dependency alignment
 
@@ -60,8 +65,10 @@ tag = "polkadot-stable2512-8"` — the strings `power-plant`'s `Cargo.toml` must
 a consumer only when the source strings match exactly; a `branch` or `rev` there against the `tag` here
 would give the consumer two `frame-support`s and a type error at every `Config` boundary. When
 `power-plant` moves its SDK, move this one to the same tag. `pallet-asset-conversion` is vendored from
-a later release and patched in by name (`vendor/pallet-asset-conversion/VENDORED.md`); a consumer
-applies the same `[patch]`.
+a later release and patched in by name (`vendor/pallet-asset-conversion/VENDORED.md`). No pallet here
+depends on it yet, so a consumer needs no `[patch]` at this commit. Once the DEX core is built on it, a
+consumer applies the same `[patch]`; without it, the consumer resolves the 2512 release's
+`pallet-asset-conversion` instead of the vendored one.
 
 ## Developing
 
