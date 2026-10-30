@@ -28,7 +28,6 @@ fn fill_consumer_slots(who: &Acc) {
 }
 
 #[test]
-#[ignore = "fails: compound is refused when the vault, its consumer slots full, has never held the launch token"]
 fn compound_burns_launch_token_vault_has_never_held_with_its_slots_full() {
     new_test_ext().execute_with(|| {
         let id = pallet_launchpad::NextLaunchId::<Test>::get();
