@@ -38,7 +38,7 @@ fn pool(a: NativeOrAssetId, b: NativeOrAssetId, each: u128) {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "fails: after the protocol fees are withdrawn, the creator's claim is refused with FundsUnavailable"]
+#[ignore = "fails: after the protocol fees are withdrawn, the creator's fee claim is refused"]
 fn withdrawing_protocol_fees_leaves_creators_unclaimed_fees_claimable() {
     new_runtime_like_ext().execute_with(|| {
         let launch = NativeOrAssetId::WithId(LAUNCH_ID);
@@ -83,7 +83,7 @@ fn routed_pool() {
 }
 
 #[test]
-#[ignore = "fails: withdrawing protocol fees is refused with Frozen once one unit of a token sits on the fee escrow"]
+#[ignore = "fails: withdrawing protocol fees is refused once one unit of a token sits on the fee escrow"]
 fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
     new_runtime_like_ext().execute_with(|| {
         routed_pool();
@@ -104,7 +104,7 @@ fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
 }
 
 #[test]
-#[ignore = "fails: a swap whose protocol slice is below the ED is refused with BelowMinimum while the fee escrow holds a sufficient token"]
+#[ignore = "fails: a swap whose protocol slice is below the ED is refused while the fee escrow holds a sufficient token"]
 fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
     new_runtime_like_ext().execute_with(|| {
         routed_pool();
@@ -129,7 +129,7 @@ fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "fails: the first deposit into a pool with no native side is refused with CannotCreate"]
+#[ignore = "fails: the first deposit into a pool with no native side is refused"]
 fn pool_without_native_side_can_be_funded() {
     new_runtime_like_ext().execute_with(|| {
         assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), usdc(), vnrg(), 10));
@@ -147,7 +147,7 @@ fn pool_without_native_side_can_be_funded() {
 }
 
 #[test]
-#[ignore = "fails: adding liquidity after the last LP has left is refused with InsufficientLiquidity"]
+#[ignore = "fails: adding liquidity after the last LP has left is refused"]
 fn pool_against_sufficient_token_still_takes_liquidity_after_its_last_lp_leaves() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 10 * UNIT);

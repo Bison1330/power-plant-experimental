@@ -659,14 +659,14 @@ proptest! {
     /// The DEX as it is, with outsiders acting on every account it owns
     /// or pays.
     #[test]
-    #[ignore = "fails: outsiders' moves leave the fee escrow holding less than the fees it owes, and a creator fee claim stuck"]
+    #[ignore = "fails: outsiders' moves leave the fee escrow holding less than it owes, or a fee claim stuck"]
     fn fuzz_dex_runtime_like_with_outsiders(ops in program(true)) {
         judge(Mode::today(true), &ops)?;
     }
 
     /// The same, from a chain whose fee escrow holds an ED.
     #[test]
-    #[ignore = "fails: with the fee escrow endowed, outsiders' moves still get a swap refused with CannotCreate"]
+    #[ignore = "fails: with the fee escrow endowed, outsiders' moves still get a swap refused"]
     fn fuzz_dex_endowed_fee_escrow_with_outsiders(ops in program(true)) {
         judge(Mode::endowed(true), &ops)?;
     }
