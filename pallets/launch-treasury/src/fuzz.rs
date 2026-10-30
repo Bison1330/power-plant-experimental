@@ -1076,8 +1076,14 @@ fn cases() -> u32 {
 /// written out. Run: `FUZZ_DUMP=/path/corpus.json cargo test -p
 /// pallet-launch-treasury --lib dump_corpus -- --ignored`.
 #[test]
-#[ignore]
+#[ignore = "a tool, not a test: writes the replay corpus to the path in FUZZ_DUMP"]
 fn dump_corpus() {
+    // `cargo test -- --ignored` runs this too; without a path it writes
+    // nothing rather than leave a file in the working tree.
+    let Ok(path) = std::env::var("FUZZ_DUMP") else {
+        eprintln!("FUZZ_DUMP is not set: no corpus written");
+        return;
+    };
     use Op::*;
     let seqs: Vec<(&str, Vec<Op>)> = vec![
         (
@@ -1163,7 +1169,6 @@ fn dump_corpus() {
         .map(|(name, ops)| serde_json::json!({ "name": name, "ops": ops }))
         .collect();
     let out = serde_json::to_string_pretty(&json).unwrap();
-    let path = std::env::var("FUZZ_DUMP").unwrap_or_else(|_| "corpus.json".into());
     std::fs::write(&path, out).unwrap();
     eprintln!("wrote {} sequences to {path}", seqs.len());
 }
