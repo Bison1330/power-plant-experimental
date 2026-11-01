@@ -75,9 +75,9 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
 
-    /// v1: the escrows hold an ED (`migrations::v1`); a chain built from
-    /// genesis starts there.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    /// No layout has changed, so nothing is versioned:
+    /// `migrations::EndowEscrows` is guarded by the escrows' balances instead.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -379,8 +379,8 @@ pub mod pallet {
 
     /// Endow the intent escrow and the fee treasury with the native ED, so
     /// both exist before the first intent or fee whatever they receive. On a
-    /// chain that receives this pallet by upgrade, `migrations::v1` does
-    /// the same.
+    /// chain that receives this pallet by upgrade, `migrations::EndowEscrows`
+    /// does the same.
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
