@@ -2314,6 +2314,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-solver-marketplace"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-assets",
+ "pallet-balances",
+ "pallet-vitreus-dex",
+ "parity-scale-codec",
+ "primitive-types 0.12.2",
+ "proptest",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
+]
+
+[[package]]
 name = "pallet-utility"
 version = "45.0.0"
 source = "git+https://github.com/paritytech/polkadot-sdk?tag=polkadot-stable2512-8#e1f0f7a3eabaf4bbfcdb6bf8de98de799bd192b8"
@@ -2341,6 +2362,7 @@ dependencies = [
  "pallet-balances",
  "parity-scale-codec",
  "primitive-types 0.12.2",
+ "proptest",
  "scale-info",
  "sp-api",
  "sp-arithmetic",

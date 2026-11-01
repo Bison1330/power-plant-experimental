@@ -42,7 +42,8 @@ use std::{cell::RefCell, collections::BTreeMap};
 type Block = frame_system::mocking::MockBlock<Test>;
 
 pub const UNIT: u128 = 1_000_000_000_000_000_000;
-pub const ED: u128 = 1_000_000_000_000; // 10^-6 VTRS
+/// The runtime's existential deposit, 100 µVTRS.
+pub const ED: u128 = 100_000_000_000_000;
 
 /// Twenty bytes, as on the chain (`fp_account::AccountId20`): every
 /// `PalletId`-derived account is truncated to twenty bytes here as it is
@@ -195,9 +196,6 @@ impl pallet_vitreus_dex::Config for Test {
     type CreatorFeeRecipient = LaunchpadCreators;
     // D9: the DEX pushes the treasury slice into this pallet.
     type TreasurySink = LaunchTreasury;
-    type DefaultBidWindowBlocks = ConstU64<10>;
-    type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = ConstU128<1_000_000_000_000>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
 	"pallets/vitreus-dex",
+	"pallets/solver-marketplace",
 	"pallets/launchpad",
 	"pallets/launch-treasury",
 	"vendor/pallet-asset-conversion",
@@ -53,6 +54,7 @@ pallet-asset-conversion = { git = "https://github.com/paritytech/polkadot-sdk", 
 
 pallet-vitreus-dex = { path = "pallets/vitreus-dex", default-features = false }
 pallet-launchpad = { path = "pallets/launchpad", default-features = false }
+pallet-solver-marketplace = { path = "pallets/solver-marketplace", default-features = false }
 pallet-launch-treasury = { path = "pallets/launch-treasury", default-features = false }
 
 # The pallet is polkadot-stable2609's, on this workspace's 2512 SDK

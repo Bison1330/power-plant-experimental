@@ -20,7 +20,8 @@ use std::cell::RefCell;
 type Block = frame_system::mocking::MockBlock<Test>;
 
 pub const UNIT: u128 = 1_000_000_000_000_000_000;
-pub const ED: u128 = 1_000_000_000_000; // 10^-6 VTRS
+/// The runtime's existential deposit, 100 µVTRS.
+pub const ED: u128 = 100_000_000_000_000;
 
 /// 32-byte account ids: PalletId sub-accounts must not truncate to a shared
 /// prefix ("modl" + "vtrs…" would make every escrow and pool account collide
@@ -188,9 +189,6 @@ impl pallet_vitreus_dex::Config for Test {
     type DefaultProtocolFeeRecipient = TreasuryAccount;
     type CreatorFeeRecipient = LaunchpadCreators;
     type TreasurySink = ();
-    type DefaultBidWindowBlocks = ConstU64<10>;
-    type DefaultSettlementWindowBlocks = ConstU64<5>;
-    type DefaultSolverBondAmount = ConstU128<1_000_000_000_000>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = ();

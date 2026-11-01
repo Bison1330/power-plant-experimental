@@ -1,15 +1,12 @@
 //! Solver Marketplace Settlement — types and pure helpers.
 //!
-//! This module defines the data model and math helpers used by the solver
-//! marketplace extrinsics. Extrinsics, storage items, events, and errors are
-//! integrated into the main pallet's `lib.rs` in a separate step, because
-//! they need access to `T::Assets`, `T::AssetKind`, `T::Balance`, and the
-//! pallet's internal swap helper.
+//! The data model and math helpers the pallet's extrinsics use, kept apart
+//! from them because they need nothing from `Config`.
 //!
 //! Economic parameters exposed here are fixed at compile time. Operational
-//! parameters (bid window, settlement window, bond amount) are exposed as
-//! runtime storage items in the main pallet and set via a governance
-//! extrinsic gated on `T::ManageOrigin`.
+//! parameters (bid window, settlement window, bond amount) are runtime
+//! storage items in the pallet, set via governance extrinsics gated on
+//! `T::ManageOrigin`.
 
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;

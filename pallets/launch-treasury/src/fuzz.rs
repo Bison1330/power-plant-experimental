@@ -804,7 +804,7 @@ fn named_accounts() -> Vec<Acc> {
     v
 }
 
-/// Every `PalletId`-derived account — the vault, the DEX's two escrows,
+/// Every `PalletId`-derived account — the vault, the DEX's fee escrow,
 /// each launch's escrow, each pool's account — is distinct from every
 /// other and from every user, at the chain's twenty-byte width. D8 was two
 /// pools sharing one account at that width; a derivation that truncates
@@ -815,7 +815,6 @@ fn derived_accounts_distinct() -> Result<(), String> {
     let mut v: Vec<(String, Acc)> = vec![
         ("vault".into(), vault()),
         ("dex fee escrow".into(), VitreusDex::fee_escrow_account()),
-        ("dex intent escrow".into(), VitreusDex::intent_escrow_account()),
         ("broker".into(), BROKER),
         ("treasury".into(), TREASURY),
         ("excess".into(), EXCESS),
