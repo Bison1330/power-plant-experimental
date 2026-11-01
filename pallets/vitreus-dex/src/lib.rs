@@ -2803,27 +2803,90 @@ pub mod migrations {
         >;
     }
 
-    /// v6: the fee escrow and every pool with liquidity hold the native ED.
+    /// Tops the fee escrow up to its ED plus every unclaimed fee, so
+    /// withdrawing them all leaves it its ED. Genesis endows it on a chain
+    /// built with the pallet; on a chain that receives the pallet by upgrade,
+    /// or had it before escrows held an ED, this does. The shortfall is paid
+    /// by `Source` (the runtime binds its Treasury), keeping its own ED, so
+    /// issuance does not change. A source that cannot pay is logged, and
+    /// `post_upgrade` then fails try-runtime: fund the source first.
+    ///
+    /// Not versioned, and must not be: when an upgrade adds the pallet, FRAME
+    /// sets its on-chain storage version to the in-code one before any
+    /// migration runs, so a version gate would always skip this. What makes a
+    /// second run harmless is that it pays only a shortfall.
+    pub struct EndowFeeEscrow<T, Source>(PhantomData<(T, Source)>);
+
+    /// The routed fees the fee escrow owes: protocol and every creator's.
+    fn fees_owed<T: Config>() -> T::Balance {
+        CreatorFeesUnclaimed::<T>::iter_values()
+            .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f))
+    }
+
+    impl<T: Config, Source: Get<T::AccountId>> frame_support::traits::OnRuntimeUpgrade
+        for EndowFeeEscrow<T, Source>
+    {
+        fn on_runtime_upgrade() -> Weight {
+            let native = T::NativeAsset::get();
+            let escrow = Pallet::<T>::fee_escrow_account();
+            let owed = fees_owed::<T>();
+            let short = owed
+                .saturating_add(Pallet::<T>::native_ed())
+                .saturating_sub(T::Assets::balance(native.clone(), &escrow));
+            let reads = 3u64.saturating_add(CreatorFeesUnclaimed::<T>::iter_keys().count() as u64);
+            let mut writes = 0u64;
+            if !short.is_zero() {
+                match T::Assets::transfer(native, &Source::get(), &escrow, short, Preserve) {
+                    Ok(_) => writes = 2,
+                    Err(e) => log::error!(
+                        target: "runtime::vitreus-dex",
+                        "EndowFeeEscrow: the source could not pay {short:?} to the fee escrow: {e:?}"
+                    ),
+                }
+            }
+            log::info!(
+                target: "runtime::vitreus-dex",
+                "EndowFeeEscrow: fee escrow topped up by {short:?}"
+            );
+            T::DbWeight::get().reads_writes(reads, writes)
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(_: sp_std::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            let held =
+                T::Assets::balance(T::NativeAsset::get(), &Pallet::<T>::fee_escrow_account());
+            frame_support::ensure!(
+                held >= fees_owed::<T>().saturating_add(Pallet::<T>::native_ed()),
+                "the fee escrow holds less than its ED and the fees it owes"
+            );
+            Ok(())
+        }
+    }
+
+    /// v6: every pool with liquidity holds the native ED.
     pub mod v6 {
         use super::*;
 
         /// Unversioned body; wrap in [`MigrateToV6`].
         ///
-        /// Genesis endows the fee escrow and a pool's first deposit endows
-        /// the pool; a chain that received the pallet by upgrade has had
-        /// neither for what it already holds. Each ED is paid by `Source`
-        /// (the runtime binds its Treasury), keeping its own ED, so issuance
-        /// does not change. A source that cannot pay is logged, and
-        /// `post_upgrade` then fails try-runtime: fund the source first.
+        /// A pool's first deposit endows its account; a pool with liquidity
+        /// from before that has had no ED for what it holds. Every such pool
+        /// gets an ED of native on top of what it holds, so its native reserve
+        /// is unchanged now that reserves are read net of what it keeps. What
+        /// it keeps of a token has no source to come from: it comes out of the
+        /// pool's token reserve, one unit less than the token's minimum
+        /// balance at most. A pool with no liquidity is endowed by its first
+        /// deposit, as any new pool is. Each ED is paid by `Source` (the
+        /// runtime binds its Treasury), keeping its own ED, so issuance does
+        /// not change. A source that cannot pay is logged, and `post_upgrade`
+        /// then fails try-runtime: fund the source first.
         ///
-        /// - The fee escrow is topped up to its ED plus every unclaimed fee,
-        ///   so withdrawing them all leaves it its ED.
-        /// - Every pool with liquidity gets an ED of native on top of what it
-        ///   holds, so its native reserve is unchanged now that reserves are
-        ///   read net of what it keeps. What it keeps of a token has no
-        ///   source to come from: it comes out of the pool's token reserve,
-        ///   one unit less than the token's minimum balance at most. A pool with no liquidity is
-        ///   endowed by its first deposit, as any new pool is.
+        /// Versioned, unlike [`EndowFeeEscrow`](super::EndowFeeEscrow): a run
+        /// pays every pool with liquidity another ED, which its reserve then
+        /// counts, so it must run once. A chain that receives the pallet by
+        /// upgrade has no pools, so the gate skipping it there loses nothing.
+        /// `post_upgrade` checks the fee escrow too, so the runtime runs
+        /// `EndowFeeEscrow` first.
         pub struct VersionUncheckedMigrateToV6<T, Source>(PhantomData<(T, Source)>);
 
         impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
@@ -2833,49 +2896,34 @@ pub mod migrations {
                 let native = T::NativeAsset::get();
                 let ed = Pallet::<T>::native_ed();
                 let source = Source::get();
-                let pay =
-                    |to: &T::AccountId, amount: T::Balance, what: &str| match T::Assets::transfer(
-                        native.clone(),
-                        &source,
-                        to,
-                        amount,
-                        Preserve,
-                    ) {
-                        Ok(_) => true,
-                        Err(e) => {
-                            log::error!(
-                                target: "runtime::vitreus-dex",
-                                "v6 migration: the source could not pay {amount:?} to {what}: {e:?}"
-                            );
-                            false
-                        },
-                    };
-                let escrow = Pallet::<T>::fee_escrow_account();
-                let owed = CreatorFeesUnclaimed::<T>::iter_values()
-                    .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
-                let short = owed
-                    .saturating_add(ed)
-                    .saturating_sub(T::Assets::balance(native.clone(), &escrow));
-                let mut reads =
-                    3u64.saturating_add(CreatorFeesUnclaimed::<T>::iter_keys().count() as u64);
-                let mut writes = 0u64;
-                if !short.is_zero() && pay(&escrow, short, "the fee escrow") {
-                    writes = writes.saturating_add(2);
-                }
+                let (mut reads, mut writes) = (0u64, 0u64);
                 let mut pools = 0u32;
                 for (pair, pool) in Pools::<T>::iter() {
                     reads = reads.saturating_add(2);
                     if TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero).is_zero() {
                         continue;
                     }
-                    if pay(&pool.pool_account, ed, "a pool account") {
-                        pools = pools.saturating_add(1);
-                        writes = writes.saturating_add(2);
+                    match T::Assets::transfer(
+                        native.clone(),
+                        &source,
+                        &pool.pool_account,
+                        ed,
+                        Preserve,
+                    ) {
+                        Ok(_) => {
+                            pools = pools.saturating_add(1);
+                            writes = writes.saturating_add(2);
+                        },
+                        Err(e) => log::error!(
+                            target: "runtime::vitreus-dex",
+                            "v6 migration: the source could not pay {ed:?} to pool account {:?}: {e:?}",
+                            pool.pool_account
+                        ),
                     }
                 }
                 log::info!(
                     target: "runtime::vitreus-dex",
-                    "v6 migration: fee escrow topped up by {short:?}; {pools} pool account(s) endowed"
+                    "v6 migration: {pools} pool account(s) endowed"
                 );
                 T::DbWeight::get().reads_writes(reads, writes)
             }
@@ -2926,8 +2974,8 @@ pub mod migrations {
             }
         }
 
-        /// Endowment of the fee escrow and the pool accounts, gated on the
-        /// pallet's on-chain storage version.
+        /// Endowment of the pool accounts, gated on the pallet's on-chain
+        /// storage version.
         pub type MigrateToV6<T, Source> = VersionedMigration<
             5,
             6,

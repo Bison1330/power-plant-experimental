@@ -259,8 +259,11 @@ fn build_runtime_like_ext(dex_genesis: bool, upgraded: bool) -> sp_io::TestExter
         SINK_VAULT.with(|v| *v.borrow_mut() = None);
         SINK_NOTED.with(|n| n.borrow_mut().clear());
         if upgraded {
-            use frame_support::traits::UncheckedOnRuntimeUpgrade;
-            crate::migrations::v6::VersionUncheckedMigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
+            // As Executive runs the upgrade that adds the pallet.
+            use frame_support::traits::{BeforeAllRuntimeMigrations, OnRuntimeUpgrade};
+            AllPalletsWithSystem::before_all_runtime_migrations();
+            crate::migrations::EndowFeeEscrow::<Test, UpgradeSource>::on_runtime_upgrade();
+            crate::migrations::v6::MigrateToV6::<Test, UpgradeSource>::on_runtime_upgrade();
             System::reset_events();
         }
     });

@@ -2721,8 +2721,8 @@ fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
 }
 
 #[test]
-fn migration_v6_endows_fee_escrow_and_every_pool_from_source() {
-    use crate::migrations::v6::MigrateToV6;
+fn migrations_endow_fee_escrow_and_every_pool_from_source_once() {
+    use crate::migrations::{v6::MigrateToV6, EndowFeeEscrow};
     use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
     frame_support::parameter_types! {
         pub const Source: AccountId = CHARLIE;
@@ -2760,6 +2760,9 @@ fn migration_v6_endows_fee_escrow_and_every_pool_from_source() {
         let issuance = Balances::total_issuance();
         let source = Balances::free_balance(CHARLIE);
 
+        // In the runtime's order: `MigrateToV6`'s try-runtime check needs
+        // the fee escrow endowed.
+        EndowFeeEscrow::<Test, Source>::on_runtime_upgrade();
         MigrateToV6::<Test, Source>::on_runtime_upgrade();
 
         assert_eq!(Balances::free_balance(account), 100_000 + ed);
@@ -2770,6 +2773,41 @@ fn migration_v6_endows_fee_escrow_and_every_pool_from_source() {
         assert_eq!(Balances::total_issuance(), issuance, "nothing minted");
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
         assert_ok!(VitreusDex::do_try_state());
+
+        // The next upgrade runs both again: the escrow is full and the
+        // version gate skips the pools, so nothing is paid.
+        EndowFeeEscrow::<Test, Source>::on_runtime_upgrade();
+        MigrateToV6::<Test, Source>::on_runtime_upgrade();
+        assert_eq!(Balances::free_balance(account), 100_000 + ed);
+        assert_eq!(Balances::free_balance(CHARLIE), source - 2 * ed);
+    });
+}
+
+#[test]
+fn migration_endows_fee_escrow_of_dex_added_by_upgrade() {
+    use crate::migrations::EndowFeeEscrow as Migration;
+    use frame_support::traits::{BeforeAllRuntimeMigrations, OnRuntimeUpgrade, PalletInfoAccess};
+
+    new_runtime_like_ext_before_upgrade().execute_with(|| {
+        let escrow = VitreusDex::fee_escrow_account();
+        // As Executive runs an upgrade that adds the pallet: nothing under its
+        // prefix, then `before_all_runtime_migrations`, then the migration.
+        let prefix = sp_io::hashing::twox_128(VitreusDex::name().as_bytes());
+        let _ = frame_support::storage::unhashed::clear_prefix(&prefix, None, None);
+        AllPalletsWithSystem::before_all_runtime_migrations();
+        let issuance = Balances::total_issuance();
+        let source = Balances::free_balance(DAVE);
+
+        Migration::<Test, UpgradeSource>::on_runtime_upgrade();
+
+        assert_eq!(Balances::free_balance(escrow), RUNTIME_ED);
+        assert_eq!(Balances::free_balance(DAVE), source - RUNTIME_ED);
+        assert_eq!(Balances::total_issuance(), issuance, "nothing minted");
+
+        // The escrow now holds its ED and owes nothing, so a second run pays
+        // nothing.
+        Migration::<Test, UpgradeSource>::on_runtime_upgrade();
+        assert_eq!(Balances::free_balance(DAVE), source - RUNTIME_ED);
     });
 }
 
