@@ -641,8 +641,12 @@ pub mod pallet {
                 TOKEN_DECIMALS,
             )?;
             T::LaunchAssets::mint_into(asset_id, &escrow, T::TotalSupply::get())?;
-            // 5. whatever the escrow can spare above ED (and above reserved deposits) goes to treasury
-            let spare = T::Currency::reducible_balance(&escrow, Preserve, Polite);
+            // 5. whatever the escrow can spare above ED (and above reserved deposits) goes to
+            //    treasury, less one more ED set aside for the pool account, which its first
+            //    deposit — the seed — endows (`MinCreationFee` covers both).
+            let pool_ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
+            let spare =
+                T::Currency::reducible_balance(&escrow, Preserve, Polite).saturating_sub(pool_ed);
             if !spare.is_zero() {
                 T::Currency::transfer(&escrow, &treasury, spare, Preserve)?;
             }
@@ -1124,11 +1128,19 @@ pub mod pallet {
             // (`account_for == None`) already does. So, as on the DEX side, a
             // treasury total (`treasury_fees_paid`) does NOT count a sub-ED slice
             // taken before the vault existed; the window closes at the vault's
-            // first ≥ED credit (LAUNCH_TREASURY_SPEC §9.6).
-            let ed = <T::Currency as FungibleInspect<T::AccountId>>::minimum_balance();
+            // first ≥ED credit. Balances decides
+            // (`can_deposit`), not whether the vault's account exists: one kept
+            // alive by a sufficient asset holds no native and still cannot
+            // take less than an ED.
             let treasury_bal: BalanceOf<T> = treasury.into();
             let sink = match sink {
-                Some(v) if treasury_bal >= ed || frame_system::Pallet::<T>::account_exists(&v) => {
+                Some(v)
+                    if <T::Currency as FungibleInspect<T::AccountId>>::can_deposit(
+                        &v,
+                        treasury_bal,
+                        frame_support::traits::tokens::Provenance::Extant,
+                    ) == frame_support::traits::tokens::DepositConsequence::Success =>
+                {
                     Some(v)
                 },
                 _ => None,

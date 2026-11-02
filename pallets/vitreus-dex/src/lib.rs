@@ -53,9 +53,10 @@ use frame_support::{
     traits::{
         fungibles::{Balanced, Inspect, Mutate},
         tokens::{
-            Balance,
+            Balance, DepositConsequence,
             Fortitude::Polite,
             Preservation::{self, Expendable, Preserve},
+            Provenance, WithdrawConsequence,
         },
         Contains, Get,
     },
@@ -220,6 +221,18 @@ impl<AssetKind, AccountId, Balance> TreasurySink<AssetKind, AccountId, Balance> 
 /// transfer. A quote computed from the stored fields overstates the output
 /// and the chain then fails the swap with `SlippageExceeded` at a tight
 /// `amount_out_min`. The frontend's swap page reads balances for this reason.
+///
+/// **What a pool account keeps as its own is not a reserve.** From its
+/// first deposit, every pool account holds the native existential deposit,
+/// as its own provider, and one less than each token's minimum balance —
+/// paid by that depositor on top of its amounts, or by a seed out of what it
+/// cannot spare (see `Pallet::pool_buffer`). The ED lets a pool with no
+/// native side hold non-sufficient tokens; and since a withdrawal or swap
+/// only ever takes reserves and leaves at least a unit of each, the account
+/// never drops below any asset's minimum, where the asset's pallet would pay
+/// the rest out with the debit and leave the remaining LPs with nothing. A
+/// reserve is the account's balance less what it keeps
+/// ([`PoolManager::native_reserves`] already subtracts it).
 #[derive(
     Clone,
     Encode,
@@ -407,12 +420,13 @@ pub mod pallet {
 
     /// v2 on the fork is D8 (hash-derived pool accounts, `migrations::v2`).
     /// v5 removes the solver marketplace's storage, which moved to a pallet
-    /// of its own (`migrations::v5`).
+    /// of its own (`migrations::v5`); v6 gives the fee escrow and every pool
+    /// account their ED (`migrations::v6`).
     /// D9 — `FeeRouting.treasury_bps`, `LastSwapBlock` — changes the shape
     /// of every stored `PoolInfo`, so on the fork it is v3 with a migration
     /// (`migrations::v3`); the submission branch, which no chain with v1
     /// pools targets, carries D9 as its v2 without one.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(5);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(6);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -757,6 +771,14 @@ pub mod pallet {
         SlippageProtectionFailed,
         /// D11: `swap_exact_tokens_for_tokens` pays out to the signer only.
         RecipientNotSigner,
+        /// The withdrawal or swap would leave the pool holding less of an
+        /// asset than its minimum balance; the asset's pallet would pay that
+        /// remainder out with it. Take a little less.
+        ReserveBelowMinimum,
+        /// The recipient cannot take what the swap or withdrawal pays it:
+        /// less than the asset's minimum balance for an account that does
+        /// not hold it, or no consumer reference left to open one.
+        RecipientCannotReceive,
     }
 
     #[pallet::hooks]
@@ -770,7 +792,7 @@ pub mod pallet {
     /// Finding 14, from-genesis path: endow the fee escrow with the native ED so
     /// it exists before the first swap and every routed protocol/creator slice —
     /// even one below ED — reaches it rather than being left in the pool. On a
-    /// chain that receives this pallet by upgrade the fork migration does the
+    /// chain that receives this pallet by upgrade, `migrations::v6` does the
     /// same; the `do_swap` guard makes correctness independent of either.
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
@@ -783,12 +805,7 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            let native = T::NativeAsset::get();
-            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
-            let escrow = Pallet::<T>::fee_escrow_account();
-            if !frame_system::Pallet::<T>::account_exists(&escrow) {
-                let _ = T::Assets::mint_into(native, &escrow, ed);
-            }
+            Pallet::<T>::mint_ed_at_genesis(&Pallet::<T>::fee_escrow_account());
         }
     }
 
@@ -875,6 +892,22 @@ pub mod pallet {
 
             ensure!(amount_a >= amount_a_min, Error::<T>::SlippageExceeded);
             ensure!(amount_b >= amount_b_min, Error::<T>::SlippageExceeded);
+            // What stays belongs to the other LPs and the locked minimum; a
+            // withdrawal that would leave less than an asset's minimum
+            // balance would take that remainder with it.
+            ensure!(
+                Self::can_debit_pool(pair.0.clone(), &pool.pool_account, amount_a)
+                    && Self::can_debit_pool(pair.1.clone(), &pool.pool_account, amount_b),
+                Error::<T>::ReserveBelowMinimum
+            );
+            // And what leaves must land: a payout the LP's own account
+            // cannot take (less than an ED of native on an account holding
+            // none, say) is refused as such.
+            ensure!(
+                Self::can_credit(pair.0.clone(), &who, amount_a)
+                    && Self::can_credit(pair.1.clone(), &who, amount_b),
+                Error::<T>::RecipientCannotReceive
+            );
 
             T::Assets::transfer(pair.0.clone(), &pool.pool_account, &who, amount_a, Expendable)?;
             T::Assets::transfer(pair.1.clone(), &pool.pool_account, &who, amount_b, Expendable)?;
@@ -1061,10 +1094,12 @@ pub mod pallet {
         /// must agree with one another. Each check is a balance the pallet
         /// promised someone or a count two maps must share:
         ///
-        /// - the fee escrow holds at least every unclaimed protocol and
-        ///   creator fee;
-        /// - a pool account holds at least its recorded reserves, and the
-        ///   pool's shares are its positions plus the locked minimum.
+        /// - the fee escrow holds its ED and, above it, every unclaimed
+        ///   protocol and creator fee;
+        /// - a pool with liquidity holds what it keeps of each asset (the ED,
+        ///   a token's minimum less one) and, above it, at least its recorded
+        ///   reserves, and
+        ///   the pool's shares are its positions plus the locked minimum.
         #[cfg(any(feature = "try-runtime", feature = "test-utils", test))]
         pub fn do_try_state() -> Result<(), sp_runtime::TryRuntimeError> {
             use frame_support::ensure;
@@ -1072,18 +1107,28 @@ pub mod pallet {
             let native = T::NativeAsset::get();
             let fees = CreatorFeesUnclaimed::<T>::iter_values()
                 .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f));
+            let ed = Self::native_ed();
             ensure!(
-                T::Assets::balance(native.clone(), &Self::fee_escrow_account()) >= fees,
-                "the fee escrow holds less than the fees it owes"
+                T::Assets::balance(native.clone(), &Self::fee_escrow_account())
+                    >= fees.saturating_add(ed),
+                "the fee escrow holds less than its ED and the fees it owes"
             );
 
             for (pair, pool) in Pools::<T>::iter() {
+                let total = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
                 ensure!(
-                    T::Assets::balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
-                        && T::Assets::balance(pair.1.clone(), &pool.pool_account) >= pool.reserve_b,
+                    total.is_zero()
+                        || (T::Assets::balance(native.clone(), &pool.pool_account) >= ed
+                            && Self::buffer_short(pair.0.clone(), &pool.pool_account).is_zero()
+                            && Self::buffer_short(pair.1.clone(), &pool.pool_account).is_zero()),
+                    "a pool with liquidity holds less than it keeps of an asset"
+                );
+                ensure!(
+                    Self::reserve_balance(pair.0.clone(), &pool.pool_account) >= pool.reserve_a
+                        && Self::reserve_balance(pair.1.clone(), &pool.pool_account)
+                            >= pool.reserve_b,
                     "a pool account holds less than its reserves"
                 );
-                let total = TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero);
                 if !total.is_zero() {
                     let positions = LiquidityPositions::<T>::iter()
                         .filter(|(_, p, _)| *p == pair)
@@ -1192,8 +1237,121 @@ pub mod pallet {
             pair: &(T::AssetKind, T::AssetKind),
             pool: &mut PoolInfo<T::Balance, T::AccountId>,
         ) {
-            pool.reserve_a = T::Assets::balance(pair.0.clone(), &pool.pool_account);
-            pool.reserve_b = T::Assets::balance(pair.1.clone(), &pool.pool_account);
+            pool.reserve_a = Self::reserve_balance(pair.0.clone(), &pool.pool_account);
+            pool.reserve_b = Self::reserve_balance(pair.1.clone(), &pool.pool_account);
+        }
+
+        /// What a pool account keeps of `asset` as its own (see
+        /// [`PoolInfo`]): the ED of native, which is also the account's
+        /// provider, and one less than a token's minimum balance. That much
+        /// is enough for a token: a swap or a withdrawal always leaves at
+        /// least one unit of the reserve (a swap takes less than the reserve,
+        /// and the locked minimum's share is at least a unit), so the account
+        /// keeps at least the minimum. A token whose minimum is one unit, as
+        /// every launch token's is, needs nothing kept.
+        pub(crate) fn pool_buffer(asset: &T::AssetKind) -> T::Balance {
+            let min = T::Assets::minimum_balance(asset.clone());
+            if asset.encode() == T::NativeAsset::get().encode() {
+                min
+            } else {
+                min.saturating_sub(One::one())
+            }
+        }
+
+        /// What `pool_account` holds of `asset` as a reserve: its balance,
+        /// less what it keeps as its own ([`Self::pool_buffer`]).
+        pub(crate) fn reserve_balance(
+            asset: T::AssetKind,
+            pool_account: &T::AccountId,
+        ) -> T::Balance {
+            let buffer = Self::pool_buffer(&asset);
+            T::Assets::balance(asset, pool_account).saturating_sub(buffer)
+        }
+
+        /// How much of `asset` `pool_account` lacks of what it keeps.
+        fn buffer_short(asset: T::AssetKind, pool_account: &T::AccountId) -> T::Balance {
+            Self::pool_buffer(&asset).saturating_sub(T::Assets::balance(asset, pool_account))
+        }
+
+        /// How a payer may spend `asset`: keeping its ED of native, and all
+        /// of a token (see `do_swap`).
+        fn keep_of(asset: &T::AssetKind) -> Preservation {
+            if asset.encode() == T::NativeAsset::get().encode() {
+                Preserve
+            } else {
+                Expendable
+            }
+        }
+
+        /// The native existential deposit.
+        pub(crate) fn native_ed() -> T::Balance {
+            <T::Assets as Inspect<T::AccountId>>::minimum_balance(T::NativeAsset::get())
+        }
+
+        /// Whether a credit of `amount` of `asset` would land on `who`, as
+        /// the asset's own pallet judges it (`can_deposit`). For native that
+        /// is the ED rule, which does not care whether the account exists:
+        /// one kept alive by a sufficient asset has no native and still
+        /// cannot take less than an ED. For a token it is the minimum balance
+        /// and the consumer references a new holder needs.
+        pub(crate) fn can_credit(
+            asset: T::AssetKind,
+            who: &T::AccountId,
+            amount: T::Balance,
+        ) -> bool {
+            T::Assets::can_deposit(asset, who, amount, Provenance::Extant)
+                == DepositConsequence::Success
+        }
+
+        /// Whether `amount` of `asset` can leave `pool_account` and leave
+        /// what stays there intact. pallet-assets pays out with a debit any
+        /// remainder below the asset's minimum balance (`ReducedToZero`),
+        /// and a pool's remainder belongs to its other LPs.
+        pub(crate) fn can_debit_pool(
+            asset: T::AssetKind,
+            pool_account: &T::AccountId,
+            amount: T::Balance,
+        ) -> bool {
+            matches!(
+                T::Assets::can_withdraw(asset, pool_account, amount),
+                WithdrawConsequence::Success
+            )
+        }
+
+        /// For a pool with no native side, give `pool_account` its ED of
+        /// native — its provider — paid by `payer`, before any token lands.
+        /// A pool with a native side gets it with that side's deposit.
+        fn endow_native_side(
+            pair: &(T::AssetKind, T::AssetKind),
+            pool_account: &T::AccountId,
+            payer: &T::AccountId,
+        ) -> DispatchResult {
+            let native = T::NativeAsset::get();
+            if pair.0.encode() == native.encode() || pair.1.encode() == native.encode() {
+                return Ok(());
+            }
+            let short = Self::buffer_short(native.clone(), pool_account);
+            if !short.is_zero() {
+                T::Assets::transfer(native, payer, pool_account, short, Preserve)?;
+            }
+            Ok(())
+        }
+
+        /// Mint the native ED into `who` if it holds less, at genesis only:
+        /// on a live chain an endowment is paid by a source account, so
+        /// issuance does not change. Returns whether it minted.
+        pub(crate) fn mint_ed_at_genesis(who: &T::AccountId) -> bool {
+            let native = T::NativeAsset::get();
+            if T::Assets::balance(native.clone(), who) >= Self::native_ed() {
+                return false;
+            }
+            match T::Assets::mint_into(native, who, Self::native_ed()) {
+                Ok(_) => true,
+                Err(e) => {
+                    log::error!(target: "runtime::vitreus-dex", "could not endow {who:?}: {e:?}");
+                    false
+                },
+            }
         }
 
         // ---- Wide-precision arithmetic helpers (D1) --------------------------
@@ -1386,12 +1544,14 @@ pub mod pallet {
                 [pair.1.clone(), pair.0.clone()]
             };
             for swept in sweep_order {
-                let held = T::Assets::reducible_balance(
-                    swept.clone(),
-                    &pool.pool_account,
-                    Expendable,
-                    Polite,
-                );
+                // Everything but the pool account's own ED (see `PoolInfo`).
+                let keep = if swept.encode() == T::NativeAsset::get().encode() {
+                    Preserve
+                } else {
+                    Expendable
+                };
+                let held =
+                    T::Assets::reducible_balance(swept.clone(), &pool.pool_account, keep, Polite);
                 if held.is_zero() {
                     continue;
                 }
@@ -1404,13 +1564,7 @@ pub mod pallet {
                 // own storage layer so the underlying error leaves nothing
                 // half-applied before the outer transactional rollback.
                 frame_support::storage::with_storage_layer(|| {
-                    T::Assets::transfer(
-                        swept.clone(),
-                        &pool.pool_account,
-                        &excess_to,
-                        held,
-                        Expendable,
-                    )
+                    T::Assets::transfer(swept.clone(), &pool.pool_account, &excess_to, held, keep)
                 })
                 .map_err(|_| Error::<T>::ExcessRecipientCannotReceive)?;
                 Self::deposit_event(Event::PreSeedBalanceSwept {
@@ -1421,17 +1575,44 @@ pub mod pallet {
                 });
             }
 
-            // 3. First deposit, with the amounts mapped onto the canonical
-            //    slots. Quote is transferred FIRST regardless of canonical
-            //    order: the pool account may have just been emptied (or never
-            //    existed) and needs a provider before it can hold a
-            //    non-sufficient asset. Do not rely on `canonical_pair` putting
-            //    the native asset first.
+            // The pool account's own minimum of each asset (see `PoolInfo`),
+            // where it holds less: paid by the seeder on top of its deposit,
+            // as any first depositor pays it. A launch sets the native one
+            // aside at creation; what the seeder cannot spare on top — the
+            // launch token, which it holds exactly as much of as it deposits,
+            // or the ED for a launch created before launches set it aside —
+            // comes out of the deposit instead, so a graduation never fails
+            // on it. Native first: it is the pool account's provider.
+            Self::endow_native_side(&pair, &pool.pool_account, who)?;
+            // For each side: the reserve it leaves, and what is paid on top.
+            let split = |a: &T::AssetKind,
+                         amount: T::Balance|
+             -> Result<(T::Balance, T::Balance), DispatchError> {
+                let short = Self::buffer_short(a.clone(), &pool.pool_account);
+                let keep = Self::keep_of(a);
+                if short.is_zero() {
+                    Ok((amount, Zero::zero()))
+                } else if T::Assets::reducible_balance(a.clone(), who, keep, Polite)
+                    >= amount.saturating_add(short)
+                {
+                    Ok((amount, short))
+                } else {
+                    Ok((
+                        amount
+                            .checked_sub(&short)
+                            .ok_or(Error::<T>::InsufficientInitialLiquidity)?,
+                        Zero::zero(),
+                    ))
+                }
+            };
+            let (quote_reserve, quote_on_top) = split(&quote, amount_quote)?;
+            let (asset_reserve, asset_on_top) = split(&asset, amount_asset)?;
+
             let asset_is_a = pair.0.encode() == asset.encode();
             let (amount_a, amount_b) = if asset_is_a {
-                (amount_asset, amount_quote)
+                (asset_reserve, quote_reserve)
             } else {
-                (amount_quote, amount_asset)
+                (quote_reserve, asset_reserve)
             };
 
             // Finding 1: first deposit — burn MINIMUM_LIQUIDITY shares permanently.
@@ -1441,8 +1622,22 @@ pub mod pallet {
             let shares_to_mint = raw_shares.checked_sub(&min_liq).ok_or(Error::<T>::Overflow)?;
             ensure!(shares_to_mint > Zero::zero(), Error::<T>::ZeroAmount);
 
-            T::Assets::transfer(quote.clone(), who, &pool.pool_account, amount_quote, Expendable)?;
-            T::Assets::transfer(asset.clone(), who, &pool.pool_account, amount_asset, Expendable)?;
+            // Quote before asset (it is the provider), each side's minimum
+            // with it where paid on top.
+            T::Assets::transfer(
+                quote.clone(),
+                who,
+                &pool.pool_account,
+                amount_quote.saturating_add(quote_on_top),
+                Expendable,
+            )?;
+            T::Assets::transfer(
+                asset.clone(),
+                who,
+                &pool.pool_account,
+                amount_asset.saturating_add(asset_on_top),
+                Expendable,
+            )?;
 
             pool.reserve_a = amount_a;
             pool.reserve_b = amount_b;
@@ -1564,8 +1759,28 @@ pub mod pallet {
             ensure!(actual_a >= amount_a_min, Error::<T>::SlippageExceeded);
             ensure!(actual_b >= amount_b_min, Error::<T>::SlippageExceeded);
 
-            T::Assets::transfer(pair.0.clone(), who, &pool.pool_account, actual_a, Expendable)?;
-            T::Assets::transfer(pair.1.clone(), who, &pool.pool_account, actual_b, Expendable)?;
+            // What the pool account keeps of each asset (see `PoolInfo`),
+            // where it lacks it — on the first deposit — from the depositor,
+            // on top of the amounts and in the same credit (a token's part
+            // alone could be below its minimum). A pool with no native side
+            // gets its ED first, as a provider for the tokens.
+            Self::endow_native_side(&pair, &pool.pool_account, who)?;
+            let extra_a = Self::buffer_short(pair.0.clone(), &pool.pool_account);
+            let extra_b = Self::buffer_short(pair.1.clone(), &pool.pool_account);
+            T::Assets::transfer(
+                pair.0.clone(),
+                who,
+                &pool.pool_account,
+                actual_a.saturating_add(extra_a),
+                Expendable,
+            )?;
+            T::Assets::transfer(
+                pair.1.clone(),
+                who,
+                &pool.pool_account,
+                actual_b.saturating_add(extra_b),
+                Expendable,
+            )?;
 
             pool.reserve_a = pool.reserve_a.checked_add(&actual_a).ok_or(Error::<T>::Overflow)?;
             pool.reserve_b = pool.reserve_b.checked_add(&actual_b).ok_or(Error::<T>::Overflow)?;
@@ -1778,7 +1993,21 @@ pub mod pallet {
             // here, not by pallet-assets declining to open the recipient's
             // token account with a zero balance (`BelowMinimum`).
             ensure!(!amount_out.is_zero(), Error::<T>::ZeroAmount);
+            // The same for an output the recipient cannot take, as the
+            // asset's pallet judges it: below the asset's minimum balance for
+            // a new holder, or no consumer reference left to open one.
+            ensure!(
+                Self::can_credit(asset_out.clone(), recipient, amount_out),
+                Error::<T>::RecipientCannotReceive
+            );
             ensure!(amount_out_gross < reserve_out, Error::<T>::InsufficientLiquidity);
+            // The pool's remainder of `asset_out` must stay intact: a debit
+            // leaving less than the asset's minimum balance would pay the
+            // remainder out with it, and it belongs to the LPs.
+            ensure!(
+                Self::can_debit_pool(asset_out.clone(), &pool.pool_account, amount_out_gross),
+                Error::<T>::ReserveBelowMinimum
+            );
 
             // `input` is about the native ED: a person keeps theirs (R9). A
             // token has no such floor for its holder — `Preserve` on a
@@ -1799,23 +2028,23 @@ pub mod pallet {
             // fee escrow before its first fee, or the treasury vault before it is
             // funded — and pallet-balances fails the transfer, which used to fail
             // the whole swap with an unreadable `Token(BelowMinimum)`. When a
-            // slice is below ED *and* its recipient has no account, leave that
+            // slice would leave its recipient's native below the ED, leave that
             // slice in the pool: it accrues to LPs at the next `sync_reserves`,
             // exactly as the pool's own fee share does (D7). The consequence,
             // stated plainly so no later reader treats a routing total as exact:
             // `ProtocolFeesUnclaimed`, `CreatorFeesUnclaimed` and the sink's
             // tally do NOT count a sub-ED slice that was redirected to LPs this
-            // way. The window is only "before the recipient's first ≥ED credit";
-            // once it exists every later slice of any size routes in full, and a
-            // GenesisConfig / migration funds the fee escrow so it never opens on
-            // a real chain.
-            let ed = <T::Assets as Inspect<T::AccountId>>::minimum_balance(native.clone());
+            // way. The window is only "before the recipient holds an ED of
+            // native" — not "before its account exists": an account kept alive
+            // by a sufficient asset holds none. Once it does, every later slice
+            // of any size routes in full, and genesis or `migrations::v6` funds
+            // the fee escrow so the window never opens for it on a real chain.
             let fee_escrow = Self::fee_escrow_account();
             // D4: move the routed slices out of the pool account into the fee
             // escrow, so neither reserves nor `sync_reserves` ever see them.
             let escrowed = protocol.checked_add(&creator).ok_or(Error::<T>::Overflow)?;
-            let route_escrowed = !escrowed.is_zero()
-                && (escrowed >= ed || frame_system::Pallet::<T>::account_exists(&fee_escrow));
+            let route_escrowed =
+                !escrowed.is_zero() && Self::can_credit(native.clone(), &fee_escrow, escrowed);
             if route_escrowed {
                 T::Assets::transfer(
                     native.clone(),
@@ -1835,9 +2064,7 @@ pub mod pallet {
             // for why a push is safe here and was not for the other two), under
             // the same Finding-14 guard.
             if let Some(vault) = sink {
-                if !treasury.is_zero()
-                    && (treasury >= ed || frame_system::Pallet::<T>::account_exists(&vault))
-                {
+                if !treasury.is_zero() && Self::can_credit(native.clone(), &vault, treasury) {
                     T::Assets::transfer(
                         native.clone(),
                         &pool.pool_account,
@@ -1970,8 +2197,8 @@ impl<T: Config> PoolManager<T::AccountId, T::AssetKind, T::Balance, BlockNumberF
         let pair = Self::canonical_pair(native.clone(), asset.clone());
         let pool = Pools::<T>::get(&pair)?;
         Some((
-            T::Assets::balance(native, &pool.pool_account),
-            T::Assets::balance(asset, &pool.pool_account),
+            Self::reserve_balance(native, &pool.pool_account),
+            Self::reserve_balance(asset, &pool.pool_account),
         ))
     }
 
@@ -2571,6 +2798,188 @@ pub mod migrations {
             4,
             5,
             VersionUncheckedMigrateToV5<T>,
+            Pallet<T>,
+            <T as frame_system::Config>::DbWeight,
+        >;
+    }
+
+    /// Tops the fee escrow up to its ED plus every unclaimed fee, so
+    /// withdrawing them all leaves it its ED. Genesis endows it on a chain
+    /// built with the pallet; on a chain that receives the pallet by upgrade,
+    /// or had it before escrows held an ED, this does. The shortfall is paid
+    /// by `Source` (the runtime binds its Treasury), keeping its own ED, so
+    /// issuance does not change. A source that cannot pay is logged, and
+    /// `post_upgrade` then fails try-runtime: fund the source first.
+    ///
+    /// Not versioned, and must not be: when an upgrade adds the pallet, FRAME
+    /// sets its on-chain storage version to the in-code one before any
+    /// migration runs, so a version gate would always skip this. What makes a
+    /// second run harmless is that it pays only a shortfall.
+    pub struct EndowFeeEscrow<T, Source>(PhantomData<(T, Source)>);
+
+    /// The routed fees the fee escrow owes: protocol and every creator's.
+    fn fees_owed<T: Config>() -> T::Balance {
+        CreatorFeesUnclaimed::<T>::iter_values()
+            .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f))
+    }
+
+    impl<T: Config, Source: Get<T::AccountId>> frame_support::traits::OnRuntimeUpgrade
+        for EndowFeeEscrow<T, Source>
+    {
+        fn on_runtime_upgrade() -> Weight {
+            let native = T::NativeAsset::get();
+            let escrow = Pallet::<T>::fee_escrow_account();
+            let owed = fees_owed::<T>();
+            let short = owed
+                .saturating_add(Pallet::<T>::native_ed())
+                .saturating_sub(T::Assets::balance(native.clone(), &escrow));
+            let reads = 3u64.saturating_add(CreatorFeesUnclaimed::<T>::iter_keys().count() as u64);
+            let mut writes = 0u64;
+            if !short.is_zero() {
+                match T::Assets::transfer(native, &Source::get(), &escrow, short, Preserve) {
+                    Ok(_) => writes = 2,
+                    Err(e) => log::error!(
+                        target: "runtime::vitreus-dex",
+                        "EndowFeeEscrow: the source could not pay {short:?} to the fee escrow: {e:?}"
+                    ),
+                }
+            }
+            log::info!(
+                target: "runtime::vitreus-dex",
+                "EndowFeeEscrow: fee escrow topped up by {short:?}"
+            );
+            T::DbWeight::get().reads_writes(reads, writes)
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(_: sp_std::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            let held =
+                T::Assets::balance(T::NativeAsset::get(), &Pallet::<T>::fee_escrow_account());
+            frame_support::ensure!(
+                held >= fees_owed::<T>().saturating_add(Pallet::<T>::native_ed()),
+                "the fee escrow holds less than its ED and the fees it owes"
+            );
+            Ok(())
+        }
+    }
+
+    /// v6: every pool with liquidity holds the native ED.
+    pub mod v6 {
+        use super::*;
+
+        /// Unversioned body; wrap in [`MigrateToV6`].
+        ///
+        /// A pool's first deposit endows its account; a pool with liquidity
+        /// from before that has had no ED for what it holds. Every such pool
+        /// gets an ED of native on top of what it holds, so its native reserve
+        /// is unchanged now that reserves are read net of what it keeps. What
+        /// it keeps of a token has no source to come from: it comes out of the
+        /// pool's token reserve, one unit less than the token's minimum
+        /// balance at most. A pool with no liquidity is endowed by its first
+        /// deposit, as any new pool is. Each ED is paid by `Source` (the
+        /// runtime binds its Treasury), keeping its own ED, so issuance does
+        /// not change. A source that cannot pay is logged, and `post_upgrade`
+        /// then fails try-runtime: fund the source first.
+        ///
+        /// Versioned, unlike [`EndowFeeEscrow`](super::EndowFeeEscrow): a run
+        /// pays every pool with liquidity another ED, which its reserve then
+        /// counts, so it must run once. A chain that receives the pallet by
+        /// upgrade has no pools, so the gate skipping it there loses nothing.
+        /// `post_upgrade` checks the fee escrow too, so the runtime runs
+        /// `EndowFeeEscrow` first.
+        pub struct VersionUncheckedMigrateToV6<T, Source>(PhantomData<(T, Source)>);
+
+        impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
+            for VersionUncheckedMigrateToV6<T, Source>
+        {
+            fn on_runtime_upgrade() -> Weight {
+                let native = T::NativeAsset::get();
+                let ed = Pallet::<T>::native_ed();
+                let source = Source::get();
+                let (mut reads, mut writes) = (0u64, 0u64);
+                let mut pools = 0u32;
+                for (pair, pool) in Pools::<T>::iter() {
+                    reads = reads.saturating_add(2);
+                    if TotalLiquidity::<T>::get(&pair).unwrap_or_else(Zero::zero).is_zero() {
+                        continue;
+                    }
+                    match T::Assets::transfer(
+                        native.clone(),
+                        &source,
+                        &pool.pool_account,
+                        ed,
+                        Preserve,
+                    ) {
+                        Ok(_) => {
+                            pools = pools.saturating_add(1);
+                            writes = writes.saturating_add(2);
+                        },
+                        Err(e) => log::error!(
+                            target: "runtime::vitreus-dex",
+                            "v6 migration: the source could not pay {ed:?} to pool account {:?}: {e:?}",
+                            pool.pool_account
+                        ),
+                    }
+                }
+                log::info!(
+                    target: "runtime::vitreus-dex",
+                    "v6 migration: {pools} pool account(s) endowed"
+                );
+                T::DbWeight::get().reads_writes(reads, writes)
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn pre_upgrade() -> Result<sp_std::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+                let reserves: sp_std::vec::Vec<_> = Pools::<T>::iter()
+                    .filter(|(pair, _)| {
+                        !TotalLiquidity::<T>::get(pair).unwrap_or_else(Zero::zero).is_zero()
+                    })
+                    .map(|(pair, p)| {
+                        (
+                            pair.clone(),
+                            T::Assets::balance(pair.0.clone(), &p.pool_account),
+                            T::Assets::balance(pair.1, &p.pool_account),
+                        )
+                    })
+                    .collect();
+                Ok(reserves.encode())
+            }
+
+            #[cfg(feature = "try-runtime")]
+            fn post_upgrade(
+                state: sp_std::vec::Vec<u8>,
+            ) -> Result<(), sp_runtime::TryRuntimeError> {
+                let before: sp_std::vec::Vec<(
+                    (T::AssetKind, T::AssetKind),
+                    T::Balance,
+                    T::Balance,
+                )> = Decode::decode(&mut &state[..]).map_err(|_| "pre_upgrade state")?;
+                let native = T::NativeAsset::get();
+                for (pair, a, b) in before {
+                    let pool = Pools::<T>::get(&pair).ok_or("a pool was lost")?;
+                    for (asset, was) in [(pair.0.clone(), a), (pair.1.clone(), b)] {
+                        let now = Pallet::<T>::reserve_balance(asset.clone(), &pool.pool_account);
+                        let lost = if asset.encode() == native.encode() {
+                            Zero::zero()
+                        } else {
+                            Pallet::<T>::pool_buffer(&asset)
+                        };
+                        frame_support::ensure!(
+                            now <= was && was.saturating_sub(now) <= lost,
+                            "a pool's reserves moved by more than a token's minimum, or it was not endowed"
+                        );
+                    }
+                }
+                Pallet::<T>::do_try_state()
+            }
+        }
+
+        /// Endowment of the pool accounts, gated on the pallet's on-chain
+        /// storage version.
+        pub type MigrateToV6<T, Source> = VersionedMigration<
+            5,
+            6,
+            VersionUncheckedMigrateToV6<T, Source>,
             Pallet<T>,
             <T as frame_system::Config>::DbWeight,
         >;

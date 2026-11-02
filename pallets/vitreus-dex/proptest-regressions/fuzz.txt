@@ -6,3 +6,6 @@
 # everyone who runs the test benefits from these saved cases.
 cc cc345d239021683217cb8a81c83877c02891cef2715feb2533df57639deb9611 # shrinks to ops = [Swap { who: 0, pool: 14, native_in: false, amount: 1000000000000000000 }, Swap { who: 0, pool: 238, native_in: false, amount: 99999999999999 }]
 cc 23fea618906138d088827f5905ece7a6b4c0769c318febf8acbfad4dd8030a65 # shrinks to ops = [FillOwnSlots { who: 24 }, Swap { who: 39, pool: 3, native_in: true, amount: 1 }]
+cc 2571f3599f52e42607823aac8485aed78cb8543d0c7e6e83b736d165c12eb2e2 # shrinks to ops = [AddLiquidity { who: 26, pool: 5, amount: 99999999999999 }]
+cc d4a109ba74fb923aae6bb1bde736880ce155ce394419951859fdc1b78c313dde # shrinks to ops = [AddLiquidity { who: 6, pool: 17, amount: 99999999999999 }]
+cc 5973791406f4a681afbd17031b95e7e4fbee258700af674484e811df437f41ca # shrinks to ops = [Swap { who: 34, pool: 14, native_in: true, amount: 99999999999999 }, AddLiquidity { who: 239, pool: 56, amount: 2 }, Reap { who: 114 }]

@@ -38,7 +38,6 @@ fn pool(a: NativeOrAssetId, b: NativeOrAssetId, each: u128) {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "fails: after the protocol fees are withdrawn, the creator's fee claim is refused"]
 fn withdrawing_protocol_fees_leaves_creators_unclaimed_fees_claimable() {
     new_runtime_like_ext().execute_with(|| {
         let launch = NativeOrAssetId::WithId(LAUNCH_ID);
@@ -83,7 +82,6 @@ fn routed_pool() {
 }
 
 #[test]
-#[ignore = "fails: withdrawing protocol fees is refused once one unit of a token sits on the fee escrow"]
 fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
     new_runtime_like_ext().execute_with(|| {
         routed_pool();
@@ -103,10 +101,12 @@ fn stray_token_unit_on_fee_escrow_does_not_freeze_protocol_fees() {
     });
 }
 
+/// Before the upgrade endows the fee escrow, so the routing guard is what
+/// is under test: an account a sufficient asset keeps alive holds no native
+/// and cannot take a sub-ED slice, whether it "exists" or not.
 #[test]
-#[ignore = "fails: a swap whose protocol slice is below the ED is refused while the fee escrow holds a sufficient token"]
 fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
-    new_runtime_like_ext().execute_with(|| {
+    new_runtime_like_ext_before_upgrade().execute_with(|| {
         routed_pool();
         // The fee escrow now exists, holding no native.
         let escrow = VitreusDex::fee_escrow_account();
@@ -129,7 +129,6 @@ fn sufficient_token_on_fee_escrow_does_not_fail_small_swaps() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "fails: the first deposit into a pool with no native side is refused"]
 fn pool_without_native_side_can_be_funded() {
     new_runtime_like_ext().execute_with(|| {
         assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), usdc(), vnrg(), 10));
@@ -147,7 +146,6 @@ fn pool_without_native_side_can_be_funded() {
 }
 
 #[test]
-#[ignore = "fails: adding liquidity after the last LP has left is refused"]
 fn pool_against_sufficient_token_still_takes_liquidity_after_its_last_lp_leaves() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 10 * UNIT);
@@ -179,7 +177,6 @@ fn pool_against_sufficient_token_still_takes_liquidity_after_its_last_lp_leaves(
 }
 
 #[test]
-#[ignore = "fails: after one LP exits, the pool account holds no native although another LP still has a share"]
 fn lps_exit_never_destroys_another_lps_share_of_pool() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 10 * UNIT);
@@ -214,7 +211,6 @@ fn lps_exit_never_destroys_another_lps_share_of_pool() {
 }
 
 #[test]
-#[ignore = "fails: after a native-out swap the pool account holds no native while its recorded reserve is above zero"]
 fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
     new_runtime_like_ext().execute_with(|| {
         pool(native(), sufficient(), 3 * RUNTIME_ED);
@@ -235,7 +231,152 @@ fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
 
         let recorded = Pools::<Test>::get(&pair).expect("pool").reserve_a;
         assert!(recorded > 0, "the swap left native in the pool");
-        assert_eq!(native_of(pool_account), recorded);
+        // No native was dusted: what the account holds as a reserve is what
+        // the pool records, and the account kept its own ED.
+        assert_eq!(VitreusDex::reserve_balance(native(), &pool_account), recorded);
+        assert!(native_of(pool_account) >= RUNTIME_ED);
+    });
+}
+
+/// The same guard for a launch's treasury vault, which nothing endows
+/// before its first fee of at least an ED.
+#[test]
+fn sufficient_token_on_launch_vault_does_not_fail_small_swaps() {
+    new_runtime_like_ext().execute_with(|| {
+        let launch = NativeOrAssetId::WithId(LAUNCH_ID);
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), LAUNCH_ID, ALICE, false, 1));
+        assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), LAUNCH_ID, ALICE, 1_000_000 * UNIT));
+        assert_ok!(VitreusDex::set_default_fee_routing(RuntimeOrigin::root(), 3, 5, 5, 10));
+        assert_ok!(<VitreusDex as crate::ReservedPoolSeeder<
+            AccountId,
+            NativeOrAssetId,
+            u128,
+            u64,
+        >>::seed_reserved_pool_for(
+            &ALICE,
+            launch.clone(),
+            native(),
+            100_000 * UNIT,
+            1_000 * UNIT,
+            3
+        ));
+        SINK_VAULT.with(|v| *v.borrow_mut() = Some(VAULT));
+        // The vault now exists, holding no native.
+        assert_ok!(Assets::transfer(RuntimeOrigin::signed(DAVE), SUFFICIENT_ID, VAULT, 1));
+
+        // Its treasury slice is below one ED.
+        assert_ok!(VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            launch,
+            UNIT / 1_000,
+            1,
+            BOB,
+        ));
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Assets whose minimum balance is above one unit
+// ---------------------------------------------------------------------------
+
+/// A non-sufficient asset with the minimum balance one testnet asset has
+/// (10^9), minted to ALICE, and a pool of `native_each` native against
+/// `token_each` of it.
+fn high_minimum_pool(native_each: u128, token_each: u128) -> (u32, AccountId) {
+    let id = crate::testing::next_free_asset_id::<Test>(100);
+    assert_ok!(Assets::force_create(RuntimeOrigin::root(), id, ALICE, false, HIGH_MINIMUM));
+    assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), id, ALICE, 1_000 * UNIT));
+    let token = NativeOrAssetId::WithId(id);
+    assert_ok!(VitreusDex::create_pool(RuntimeOrigin::root(), native(), token.clone(), 10));
+    assert_ok!(VitreusDex::add_liquidity(
+        RuntimeOrigin::signed(ALICE),
+        native(),
+        token.clone(),
+        native_each,
+        token_each,
+        0,
+        0
+    ));
+    let account = Pools::<Test>::get(VitreusDex::canonical_pair(native(), token))
+        .unwrap()
+        .pool_account;
+    (id, account)
+}
+
+const HIGH_MINIMUM: u128 = 1_000_000_000;
+
+/// pallet-assets pays out with a debit any remainder below the asset's
+/// minimum balance; a pool's remainder belongs to its LPs.
+#[test]
+fn swap_never_takes_pools_token_remainder_below_its_minimum() {
+    new_runtime_like_ext().execute_with(|| {
+        let (id, account) = high_minimum_pool(10 * UNIT, 3 * HIGH_MINIMUM);
+        let token = NativeOrAssetId::WithId(id);
+        // Enough native to buy all but about 0.86 of a minimum balance.
+        let _ = VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            token.clone(),
+            25 * UNIT,
+            1,
+            BOB,
+        );
+        let recorded = Pools::<Test>::get(VitreusDex::canonical_pair(native(), token))
+            .unwrap()
+            .reserve_b;
+        assert_eq!(
+            VitreusDex::reserve_balance(NativeOrAssetId::WithId(id), &account),
+            recorded,
+            "the pool holds what it records"
+        );
+        assert!(Assets::balance(id, account) >= HIGH_MINIMUM);
+    });
+}
+
+#[test]
+fn lps_exit_never_takes_pools_token_remainder_below_its_minimum() {
+    new_runtime_like_ext().execute_with(|| {
+        let (id, account) = high_minimum_pool(10 * UNIT, 3 * HIGH_MINIMUM);
+        let token = NativeOrAssetId::WithId(id);
+        let pair = VitreusDex::canonical_pair(native(), token.clone());
+        let shares = crate::LiquidityPositions::<Test>::get(ALICE, &pair).unwrap().shares;
+        // The locked minimum's share of 3·10^9 is far below 10^9.
+        let _ = VitreusDex::remove_liquidity(
+            RuntimeOrigin::signed(ALICE),
+            native(),
+            token.clone(),
+            shares,
+            0,
+            0,
+        );
+        let recorded = Pools::<Test>::get(&pair).unwrap().reserve_b;
+        assert_eq!(
+            VitreusDex::reserve_balance(NativeOrAssetId::WithId(id), &account),
+            recorded,
+            "the pool holds what it records"
+        );
+        assert!(Assets::balance(id, account) >= HIGH_MINIMUM);
+    });
+}
+
+/// A swap whose output a new holder could not take is refused as such, not
+/// by pallet-assets with `Token(BelowMinimum)`.
+#[test]
+fn swap_output_below_new_holders_minimum_is_refused_by_name() {
+    new_runtime_like_ext().execute_with(|| {
+        let (id, _) = high_minimum_pool(10_000 * UNIT, 1_000 * HIGH_MINIMUM);
+        assert_eq!(
+            VitreusDex::swap_exact_tokens_for_tokens(
+                RuntimeOrigin::signed(BOB),
+                native(),
+                NativeOrAssetId::WithId(id),
+                UNIT,
+                1,
+                BOB,
+            ),
+            Err(crate::Error::<Test>::RecipientCannotReceive.into())
+        );
     });
 }
 
@@ -247,6 +388,26 @@ fn native_out_swap_never_leaves_pool_holding_less_native_than_it_records() {
 fn chain_from_genesis_starts_with_fee_escrow_holding_ed() {
     new_runtime_like_ext_from_genesis().execute_with(|| {
         let escrow = VitreusDex::fee_escrow_account();
+        assert!(native_of(escrow) >= RUNTIME_ED, "{escrow} holds {}", native_of(escrow));
+    });
+}
+
+#[test]
+fn chain_from_genesis_endows_fee_escrow_token_already_keeps_alive() {
+    use sp_runtime::BuildStorage;
+    ExistentialDeposit::set(RUNTIME_ED);
+    AssetDeposit::set(RUNTIME_ASSET_DEPOSIT);
+    AssetAccountDeposit::set(RUNTIME_ASSET_ACCOUNT_DEPOSIT);
+    let mut t = runtime_like_storage::<Test>();
+    let escrow = VitreusDex::fee_escrow_account();
+    pallet_assets::GenesisConfig::<Test> {
+        accounts: vec![(SUFFICIENT_ID, escrow, 1)],
+        ..Default::default()
+    }
+    .assimilate_storage(&mut t)
+    .unwrap();
+    crate::GenesisConfig::<Test>::default().assimilate_storage(&mut t).unwrap();
+    sp_io::TestExternalities::new(t).execute_with(|| {
         assert!(native_of(escrow) >= RUNTIME_ED, "{escrow} holds {}", native_of(escrow));
     });
 }
