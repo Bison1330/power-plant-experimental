@@ -425,8 +425,9 @@ pub mod pallet {
 
     /// v2 on the fork is D8 (hash-derived pool accounts, `migrations::v2`).
     /// v5 removes the solver marketplace's storage, which moved to a pallet
-    /// of its own (`migrations::v5`); v6 gives the fee escrow and every pool
-    /// account their ED (`migrations::v6`).
+    /// of its own (`migrations::v5`); v6 gives every pool account its ED
+    /// (`migrations::v6`). The fee escrow's ED is not behind a version:
+    /// `migrations::EndowFeeEscrow` tops it up on every upgrade.
     /// D9 — `FeeRouting.treasury_bps`, `LastSwapBlock` — changes the shape
     /// of every stored `PoolInfo`, so on the fork it is v3 with a migration
     /// (`migrations::v3`); the submission branch, which no chain with v1
@@ -815,8 +816,11 @@ pub mod pallet {
     /// Finding 14, from-genesis path: endow the fee escrow with the native ED so
     /// it exists before the first swap and every routed protocol/creator slice —
     /// even one below ED — reaches it rather than being left in the pool. On a
-    /// chain that receives this pallet by upgrade, `migrations::v6` does the
-    /// same; the `do_swap` guard makes correctness independent of either.
+    /// chain that receives this pallet by upgrade, `migrations::EndowFeeEscrow`
+    /// does the same, on every upgrade rather than behind a storage version: a
+    /// version gate is skipped when the pallet arrives by upgrade, because the
+    /// in-code version is stamped on its empty storage first. The `do_swap`
+    /// guard makes correctness independent of either.
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
@@ -2105,8 +2109,9 @@ pub mod pallet {
             // way. The window is only "before the recipient holds an ED of
             // native" — not "before its account exists": an account kept alive
             // by a sufficient asset holds none. Once it does, every later slice
-            // of any size routes in full, and genesis or `migrations::v6` funds
-            // the fee escrow so the window never opens for it on a real chain.
+            // of any size routes in full, and genesis or
+            // `migrations::EndowFeeEscrow` funds the fee escrow so the window
+            // never opens for it on a real chain.
             let fee_escrow = Self::fee_escrow_account();
             // D4: move the routed slices out of the pool account into the fee
             // escrow, so neither reserves nor `sync_reserves` ever see them.
