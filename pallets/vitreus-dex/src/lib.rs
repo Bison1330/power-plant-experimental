@@ -801,7 +801,8 @@ pub mod pallet {
         ReserveBelowMinimum,
         /// The recipient cannot take what the swap or withdrawal pays it:
         /// less than the asset's minimum balance for an account that does
-        /// not hold it, or no consumer reference left to open one.
+        /// not hold it, or no consumer reference left to open one and no
+        /// deposit the payer can spare instead.
         RecipientCannotReceive,
     }
 
@@ -1358,13 +1359,22 @@ pub mod pallet {
         /// `payer` must be the signer of the extrinsic being served, never
         /// an account the pallet owns: a deposit reserved there would no
         /// longer match what the pallet records it holds.
+        ///
+        /// A payer who cannot pay the deposit and keep its ED is refused with
+        /// `RecipientCannotReceive`, the error a full account gets when no
+        /// deposit is on offer.
         pub fn open_for_credit(
             asset: T::AssetKind,
             who: &T::AccountId,
             payer: &T::AccountId,
         ) -> DispatchResult {
             if T::Assets::should_touch(asset.clone(), who) {
-                T::Assets::touch(asset, who, payer)?;
+                // `ConsumerRemaining` is `pallet_balances` refusing to let a
+                // payer with consumers fall below its ED.
+                T::Assets::touch(asset, who, payer).map_err(|e| match e {
+                    DispatchError::ConsumerRemaining => Error::<T>::RecipientCannotReceive.into(),
+                    e => e,
+                })?;
             }
             Ok(())
         }

@@ -3,7 +3,10 @@
 //! anyone can open such balances on a public address.
 
 use crate::{mock::*, Curves, Event, LaunchId, NextLaunchId, Phase};
-use frame_support::assert_ok;
+use frame_support::{
+    assert_noop, assert_ok,
+    storage::{with_storage_layer, with_transaction, TransactionOutcome},
+};
 use sp_runtime::DispatchError;
 use std::borrow::Borrow;
 
@@ -134,5 +137,58 @@ fn buyer_with_every_consumer_slot_used_can_still_buy_launch_token() {
         assert_ok!(Launchpad::buy(origin(BOB), id, 10 * UNIT, 0));
         assert!(Assets::balance(asset_of(id), &BOB) > 0);
         assert_eq!(Balances::reserved_balance(&BOB), reserved + 10);
+    });
+}
+
+fn cannot_receive() -> DispatchError {
+    pallet_vitreus_dex::Error::<Test>::RecipientCannotReceive.into()
+}
+
+/// The deposit is the buyer's to pay: one who cannot pay it and keep an ED
+/// is refused by name, with nothing moved.
+#[test]
+fn full_slots_buyer_short_of_the_deposit_is_refused_by_name() {
+    new_test_ext().execute_with(|| {
+        let id = create(ALICE);
+        fill_consumer_slots(&BOB);
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), BOB, ED + 9));
+        assert_noop!(Launchpad::buy(origin(BOB), id, 1_000, 0), cannot_receive());
+
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), BOB, 100 * UNIT));
+        assert_ok!(Launchpad::buy(origin(BOB), id, 10 * UNIT, 0));
+    });
+}
+
+/// The same refusal for a creator's first buy, which comes after the launch
+/// is written: the whole creation goes with it.
+#[test]
+fn full_slots_creator_short_of_the_deposit_is_refused_by_name() {
+    new_test_ext().execute_with(|| {
+        fill_consumer_slots(&BOB);
+        let launch = |initial_buy| {
+            Launchpad::create_launch(
+                origin(BOB),
+                bv(b"Meme"),
+                bv(b"MEME"),
+                None,
+                initial_buy,
+                0,
+                None,
+                None,
+            )
+        };
+        let before = Balances::free_balance(&BOB);
+        let cost = with_transaction(|| {
+            assert_ok!(launch(0));
+            let cost = before - Balances::free_balance(&BOB);
+            TransactionOutcome::Rollback(Ok::<_, DispatchError>(cost))
+        })
+        .unwrap();
+
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), BOB, ED + cost + 9));
+        let id = NextLaunchId::<Test>::get();
+        assert_eq!(with_storage_layer(|| launch(UNIT)).map_err(|e| e.error), Err(cannot_receive()));
+        assert_eq!(NextLaunchId::<Test>::get(), id);
+        assert_eq!(Balances::free_balance(&BOB), ED + cost + 9);
     });
 }
