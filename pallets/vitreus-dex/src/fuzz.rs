@@ -836,6 +836,33 @@ fn full_slots_buyer_short_of_the_deposit_is_refused_by_name() {
     });
 }
 
+/// A full-slots buyer pays the deposit out of the same spare balance as the
+/// swap. `affordable` offers half of what is spare, so between one and two
+/// deposits spare, that half and the deposit together are more than the buyer
+/// has: `leaving_deposit` has to cut the amount to what the deposit leaves.
+#[test]
+fn leaving_deposit_caps_full_slots_buy_to_what_deposit_leaves() {
+    use frame_support::assert_ok;
+    new_runtime_like_ext().execute_with(|| {
+        setup(Mode::today(true));
+        let mut world = World { findings: BTreeMap::new(), at: 0, broken: None };
+        fill_consumer_slots(BOB);
+
+        let deposit = AssetAccountDeposit::get();
+        let spare = 15;
+        assert!(spare > deposit && spare / 2 + deposit > spare);
+        assert_ok!(Balances::force_set_balance(RuntimeOrigin::root(), BOB, RUNTIME_ED + spare));
+
+        let buy = Op::Swap { who: 66, pool: 10, native_in: true, amount: 1_000 };
+        let (_, result) = world.step(&buy).expect("BOB can spare something");
+        assert_ok!(result);
+
+        assert_eq!(Balances::free_balance(BOB), RUNTIME_ED);
+        assert_eq!(Balances::reserved_balance(BOB), deposit);
+        assert!(Assets::balance(FRESH_ID, BOB) > 0);
+    });
+}
+
 // ---- properties -------------------------------------------------------------
 
 fn cases() -> u32 {
