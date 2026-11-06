@@ -203,7 +203,8 @@ fn lifecycle_happy_path() {
         // adds its net + creator fee to the escrow
         let s0 = state(id);
         assert_eq!(vtrs(&l.escrow), 2 * ED + s0.real_quote + s0.creator_fees_unclaimed);
-        assert_eq!(Balances::reserved_balance(&l.escrow), 100 + 2 * 4 + 2 * 4);
+        // + the deposit for the pool address's launch-token account
+        assert_eq!(Balances::reserved_balance(&l.escrow), 100 + 2 * 4 + 2 * 4 + 10);
         assert!(tok(id, ALICE) > 0);
 
         let buyers = [BOB, CHARLIE, DAVE];
@@ -252,7 +253,7 @@ fn lifecycle_happy_path() {
         let s = state(id);
         assert_eq!(
             vtrs(TREASURY) - treasury_before,
-            s.protocol_fees_paid + (CREATION_FEE - 2 * ED - (100 + 2 * 4 + 2 * 4))
+            s.protocol_fees_paid + (CREATION_FEE - 2 * ED - (100 + 2 * 4 + 2 * 4 + 10))
         );
         assert!(has_event(|e| matches!(e, Event::Graduated { .. })));
     });
@@ -434,10 +435,12 @@ fn fm02_prefunded_pool_account_does_not_move_opening_price() {
         // beyond the pool account's own ED, which is not a reserve.
         assert_eq!(vtrs(&pa), raised + ED);
         assert_eq!(tok(id, &pa), RESERVED);
-        // Donations went to the DEX excess recipient, all but the first ED
-        // of native, which the pool account kept as its own.
+        // The native donation went to the DEX excess recipient, all but the
+        // first ED, which the pool account kept as its own; the token
+        // donation was burned.
         assert_eq!(vtrs(EXCESS) - excess_before.0, 5 * UNIT - ED);
-        assert_eq!(tok(id, EXCESS) - excess_before.1, donated_tokens);
+        assert_eq!(tok(id, EXCESS) - excess_before.1, 0);
+        assert_eq!(Assets::total_supply(asset_of(id)), 1_000_000_000 * UNIT - donated_tokens);
         // First swap prices off the stored reserves (sync_reserves finds nothing extra).
         let amount_in = 10 * UNIT;
         let after_fee = amount_in - amount_in * 3 / 1_000;
@@ -783,9 +786,14 @@ fn fm06_no_creator_lp_and_position_is_permanent() {
 
 /// Make the next seed fail: drain the DEX excess recipient so a pre-seed token
 /// donation at the pool address cannot be delivered (ExcessRecipientCannotReceive).
+/// Make the seed fail: the pre-seed sweep of a native donation that leaves
+/// less than an ED to an excess recipient holding nothing. (A donation of
+/// the launch token is burned, so it cannot fail the seed.)
 fn arm_seed_failure(id: LaunchId, donor: impl Borrow<Acc>) {
     let donor = donor.borrow();
-    assert_ok!(Balances::transfer_allow_death(origin(donor), pool_account(id), UNIT));
+    // The pool account keeps the first ED as its own; the half ED above it
+    // is what the sweep cannot deliver.
+    assert_ok!(Balances::transfer_allow_death(origin(donor), pool_account(id), ED + ED / 2));
     assert_ok!(Assets::transfer(
         origin(donor),
         asset_of(id).into(),
@@ -1476,7 +1484,9 @@ fn fm15_escrow_survives_full_sellback_and_claims() {
             assert_ok!(Launchpad::claim_creator_fees(origin(ALICE), id));
             assert!(frame_system::Pallet::<Test>::account_exists(&e));
             assert!(vtrs(&e) >= ED);
-            assert_eq!(Balances::reserved_balance(&e), 100 + 2 * 4 + 2 * 4); // metadata base + per-byte; Create::create reserves no AssetDeposit
+            // metadata base + per-byte, and the pool address's launch-token
+            // account; Create::create reserves no AssetDeposit
+            assert_eq!(Balances::reserved_balance(&e), 100 + 2 * 4 + 2 * 4 + 10);
             assert_eq!(tok(id, &e), 1_000_000_000 * UNIT);
             buy(DAVE, id, UNIT);
             assert!(tok(id, DAVE) > 0);

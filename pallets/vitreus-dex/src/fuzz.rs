@@ -362,11 +362,7 @@ impl World {
                 let asset = kind(pool_asset(pool));
                 let (a_in, a_out) = if native_in { (native(), asset) } else { (asset, native()) };
                 let amount = affordable(&who, &a_in, amount)?;
-                // A trader whose own account cannot open another asset is
-                // refused by pallet-assets, not by the DEX.
-                if !can_hold(&who, &a_out) {
-                    return None;
-                }
+                let amount = leaving_deposit(&who, &a_out, amount);
                 (
                     "swap",
                     VitreusDex::swap_exact_tokens_for_tokens(
@@ -568,14 +564,24 @@ fn affordable(who: &AccountId, asset: &NativeOrAssetId, amount: u128) -> Option<
     (a > 0).then_some(a)
 }
 
-/// Whether `who` holds `asset` already or could open it: pallet-assets
-/// opens a non-sufficient balance only on an account that could take two
-/// more consumer references.
-fn can_hold(who: &AccountId, asset: &NativeOrAssetId) -> bool {
+/// `amount` capped so that `who` can also pay the deposit that opens its
+/// account for `asset_out`, when it needs one. An actor who cannot pay the
+/// deposit at all still tries: that refusal is judged.
+fn leaving_deposit(who: &AccountId, asset_out: &NativeOrAssetId, amount: u128) -> u128 {
     use frame_support::traits::fungibles::Inspect;
-    matches!(asset, NativeOrAssetId::Native)
-        || <Test as Config>::Assets::balance(asset.clone(), who) > 0
-        || frame_system::Pallet::<Test>::can_accrue_consumers(who, 2)
+    if !<Test as Config>::Assets::should_touch(asset_out.clone(), who) {
+        return amount;
+    }
+    let held = <Test as Config>::Assets::reducible_balance(
+        native(),
+        who,
+        Preservation::Preserve,
+        frame_support::traits::tokens::Fortitude::Polite,
+    );
+    match held.saturating_sub(AssetAccountDeposit::get()) {
+        0 => amount,
+        left => amount.min(left),
+    }
 }
 
 /// One-unit balances of fresh non-sufficient assets on `who` until
@@ -675,6 +681,61 @@ fn survey_endowed_honest() {
 #[ignore = "a survey, not a property: run by hand with --nocapture"]
 fn survey_endowed_hostile() {
     survey(Mode::endowed(true), 400);
+}
+
+// ---- regressions ------------------------------------------------------------
+
+/// What proptest's seed `cc 9dde13b6…f703` in `proptest-regressions/fuzz.txt`
+/// shrinks to: BOB sends his native away, gets two units back, fills his
+/// slots, and buys an asset he does not hold. He cannot pay the deposit that
+/// would open it and keep his ED, and is refused by name with nothing moved.
+/// One unit more than the deposit and the amount, and the same buy goes through.
+#[test]
+fn full_slots_buyer_short_of_the_deposit_is_refused_by_name() {
+    use frame_support::{assert_noop, assert_ok};
+    let ops = [
+        Op::Reap { who: 131 },
+        Op::Swap { who: 126, pool: 72, native_in: false, amount: 3 },
+        Op::FillOwnSlots { who: 191 },
+        Op::Swap { who: 66, pool: 10, native_in: true, amount: 1 },
+    ];
+    assert_eq!(run_program(Mode::today(true), &ops), BTreeMap::new());
+
+    let buy = |amount| {
+        VitreusDex::swap_exact_tokens_for_tokens(
+            RuntimeOrigin::signed(BOB),
+            native(),
+            kind(FRESH_ID),
+            amount,
+            1,
+            BOB,
+        )
+    };
+    new_runtime_like_ext().execute_with(|| {
+        setup(Mode::today(true));
+        let mut world = World { findings: BTreeMap::new(), at: 0, broken: None };
+        for op in &ops[..3] {
+            world.step(op);
+        }
+        assert_eq!(Balances::free_balance(BOB), RUNTIME_ED + 2);
+        assert_noop!(buy(1), Error::<Test>::RecipientCannotReceive);
+
+        let deposit = AssetAccountDeposit::get();
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            BOB,
+            RUNTIME_ED + deposit - 1
+        ));
+        assert_noop!(buy(1), Error::<Test>::RecipientCannotReceive);
+
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            BOB,
+            RUNTIME_ED + deposit + 1_000
+        ));
+        assert_ok!(buy(1_000));
+        assert_eq!(Balances::reserved_balance(BOB), deposit);
+    });
 }
 
 // ---- properties -------------------------------------------------------------
