@@ -448,7 +448,8 @@ pub mod pallet {
 
     /// v7: the core on the base pallet. A chain at v4 reaches it through
     /// `migrations::v7::MigrateToV7`, which clears the single-pool core's
-    /// storage and carries v5's and v6's steps.
+    /// storage and carries v5's step. The fee escrow's ED is not behind a
+    /// version: `migrations::EndowFeeEscrow` tops it up on every upgrade.
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(7);
 
     #[pallet::pallet]
@@ -2248,11 +2249,16 @@ pub mod migrations {
     /// them. What is dropped is logged, each pool with its id and account.
     ///
     /// Also carried: v5's removal of the solver marketplace's items (a chain
-    /// at v4 never ran it; list this migration alone, not v5 as well), and
-    /// the fee escrow's ED from `Source`, which v6 gave it. Kept:
+    /// at v4 never ran it; list this migration, not v5 as well). Kept:
     /// `DefaultFeeRouting`, `ProtocolFeeRecipient`, and the fees owed —
     /// `ProtocolFeesUnclaimed` and `CreatorFeesUnclaimed`, whose native the
     /// fee escrow holds and the new core pays out under the same keys.
+    ///
+    /// Versioned, unlike [`EndowFeeEscrow`]: `Pools` keeps its name, so a run
+    /// on a later upgrade would clear the new core's records. Gated on v4
+    /// alone, so a chain at v5 or v6 skips it and keeps the single-pool
+    /// core's storage: this pallet must reach a chain from v4 or by being
+    /// added. List it with [`EndowFeeEscrow`], in either order.
     pub mod v7 {
         use super::*;
         use frame_support::{
@@ -2290,12 +2296,6 @@ pub mod migrations {
             storage_prefix(Pallet::<T>::name().as_bytes(), item.as_bytes())
         }
 
-        /// The routed fees the escrow owes: protocol and every creator's.
-        pub fn fees_owed<T: Config>() -> T::Balance {
-            CreatorFeesUnclaimed::<T>::iter_values()
-                .fold(ProtocolFeesUnclaimed::<T>::get(), |a, f| a.saturating_add(f))
-        }
-
         /// How many keys each of [`CLEARED`] holds.
         pub fn counts<T: Config>() -> sp_std::vec::Vec<u32> {
             CLEARED
@@ -2316,13 +2316,10 @@ pub mod migrations {
                 .collect()
         }
 
-        /// Unversioned body; wrap in [`MigrateToV7`]. `Source` pays the fee
-        /// escrow's ED where it holds less, as the runtime's Treasury.
-        pub struct VersionUncheckedMigrateToV7<T, Source>(PhantomData<(T, Source)>);
+        /// Unversioned body; wrap in [`MigrateToV7`].
+        pub struct VersionUncheckedMigrateToV7<T>(PhantomData<T>);
 
-        impl<T: Config, Source: Get<T::AccountId>> UncheckedOnRuntimeUpgrade
-            for VersionUncheckedMigrateToV7<T, Source>
-        {
+        impl<T: Config> UncheckedOnRuntimeUpgrade for VersionUncheckedMigrateToV7<T> {
             fn on_runtime_upgrade() -> Weight {
                 let (mut reads, mut writes) = (0u64, 0u64);
                 // Name every pool that is lost, before its record goes.
@@ -2349,26 +2346,7 @@ pub mod migrations {
                     }
                 }
                 let w = v5::VersionUncheckedMigrateToV5::<T>::on_runtime_upgrade();
-
-                // The fee escrow's ED above the fees it owes, paid by `Source`
-                // (nothing is minted).
-                let escrow = Pallet::<T>::fee_escrow_account();
-                let native = T::NativeAsset::get();
-                let short = Pallet::<T>::native_ed()
-                    .saturating_add(fees_owed::<T>())
-                    .saturating_sub(T::Assets::balance(native.clone(), &escrow));
-                if !short.is_zero() {
-                    match T::Assets::transfer(native, &Source::get(), &escrow, short, Preserve) {
-                        Ok(_) => writes = writes.saturating_add(2),
-                        Err(e) => log::error!(
-                            target: "runtime::vitreus-dex",
-                            "v7 migration: the fee escrow's ED could not be paid ({e:?}); routed slices below it go to the pool until it holds one"
-                        ),
-                    }
-                }
-                T::DbWeight::get()
-                    .reads_writes(reads.saturating_add(2), writes)
-                    .saturating_add(w)
+                T::DbWeight::get().reads_writes(reads, writes).saturating_add(w)
             }
 
             /// Records what the upgrade drops; never fails, so a chain
@@ -2394,21 +2372,15 @@ pub mod migrations {
                     "the single-pool core's storage is cleared"
                 );
                 frame_support::ensure!(!v5::any_left::<T>(), "no marketplace key is left");
-                let escrow = Pallet::<T>::fee_escrow_account();
-                frame_support::ensure!(
-                    T::Assets::balance(T::NativeAsset::get(), &escrow)
-                        >= Pallet::<T>::native_ed().saturating_add(fees_owed::<T>()),
-                    "the fee escrow holds its ED and the fees it owes"
-                );
                 Ok(())
             }
         }
 
         /// v4 → v7, gated on the pallet's on-chain storage version.
-        pub type MigrateToV7<T, Source> = VersionedMigration<
+        pub type MigrateToV7<T> = VersionedMigration<
             4,
             7,
-            VersionUncheckedMigrateToV7<T, Source>,
+            VersionUncheckedMigrateToV7<T>,
             Pallet<T>,
             <T as frame_system::Config>::DbWeight,
         >;

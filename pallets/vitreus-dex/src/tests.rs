@@ -2417,7 +2417,6 @@ fn fee_escrow_is_topped_up_from_source_once() {
 
 #[test]
 fn migration_endows_fee_escrow_of_dex_added_by_upgrade() {
-    use crate::migrations::EndowFeeEscrow as Migration;
     use frame_support::traits::{BeforeAllRuntimeMigrations, OnRuntimeUpgrade, PalletInfoAccess};
 
     new_runtime_like_ext_before_upgrade().execute_with(|| {
@@ -2430,7 +2429,7 @@ fn migration_endows_fee_escrow_of_dex_added_by_upgrade() {
         let issuance = Balances::total_issuance();
         let source = Balances::free_balance(DAVE);
 
-        Migration::<Test, UpgradeSource>::on_runtime_upgrade();
+        UpgradeToV7::<UpgradeSource>::on_runtime_upgrade();
 
         assert_eq!(Balances::free_balance(escrow), RUNTIME_ED);
         assert_eq!(Balances::free_balance(DAVE), source - RUNTIME_ED);
@@ -2438,7 +2437,7 @@ fn migration_endows_fee_escrow_of_dex_added_by_upgrade() {
 
         // The escrow now holds its ED and owes nothing, so a second run pays
         // nothing.
-        Migration::<Test, UpgradeSource>::on_runtime_upgrade();
+        UpgradeToV7::<UpgradeSource>::on_runtime_upgrade();
         assert_eq!(Balances::free_balance(DAVE), source - RUNTIME_ED);
     });
 }
@@ -2522,6 +2521,10 @@ frame_support::parameter_types! {
     pub const V7Source: AccountId = CHARLIE;
 }
 
+/// What the runtime lists for the upgrade to the new core.
+type UpgradeToV7<Source> =
+    (crate::migrations::EndowFeeEscrow<Test, Source>, crate::migrations::v7::MigrateToV7<Test>);
+
 #[test]
 fn migration_v7_clears_single_pool_core_and_keeps_settings() {
     use crate::migrations::{v5, v7};
@@ -2536,7 +2539,7 @@ fn migration_v7_clears_single_pool_core_and_keeps_settings() {
         let issuance = Balances::total_issuance();
         let source = Balances::free_balance(CHARLIE);
 
-        v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+        UpgradeToV7::<V7Source>::on_runtime_upgrade();
 
         // Cleared, the marketplace's items included.
         assert_eq!(v7::counts::<Test>(), vec![0, 0, 0, 0]);
@@ -2561,7 +2564,7 @@ fn migration_v7_clears_single_pool_core_and_keeps_settings() {
 
         // Gated: a second run does nothing.
         crate::ProtocolFeesUnclaimed::<Test>::put(501);
-        v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+        v7::MigrateToV7::<Test>::on_runtime_upgrade();
         assert_eq!(crate::ProtocolFeesUnclaimed::<Test>::get(), 501);
 
         // And the core works on the cleared chain: the pair can be created again.
@@ -2585,9 +2588,7 @@ fn migration_v7_passes_its_own_try_runtime_checks() {
     new_test_ext().execute_with(|| {
         write_v4_storage();
         ExistentialDeposit::set(1_000);
-        assert_ok!(crate::migrations::v7::MigrateToV7::<Test, V7Source>::try_on_runtime_upgrade(
-            true
-        ));
+        assert_ok!(UpgradeToV7::<V7Source>::try_on_runtime_upgrade(true));
     });
 }
 
@@ -2597,7 +2598,7 @@ fn migration_v7_runs_only_on_v4_chain() {
     new_test_ext().execute_with(|| {
         let pair = write_v4_storage();
         StorageVersion::new(6).put::<VitreusDex>();
-        crate::migrations::v7::MigrateToV7::<Test, V7Source>::on_runtime_upgrade();
+        crate::migrations::v7::MigrateToV7::<Test>::on_runtime_upgrade();
         assert_eq!(crate::migrations::v7::counts::<Test>(), vec![1, 1, 1, 1], "untouched");
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
         let _ = pair;
@@ -2634,11 +2635,9 @@ fn migration_v7_on_testnets_own_storage() {
         let issuance = Balances::total_issuance();
 
         #[cfg(feature = "try-runtime")]
-        assert_ok!(crate::migrations::v7::MigrateToV7::<Test, Treasury>::try_on_runtime_upgrade(
-            true
-        ));
+        assert_ok!(UpgradeToV7::<Treasury>::try_on_runtime_upgrade(true));
         #[cfg(not(feature = "try-runtime"))]
-        crate::migrations::v7::MigrateToV7::<Test, Treasury>::on_runtime_upgrade();
+        UpgradeToV7::<Treasury>::on_runtime_upgrade();
 
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(7));
         assert_eq!(
