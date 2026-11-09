@@ -2356,10 +2356,10 @@ fn d9_swap_for_native_reserves_and_last_swap_block() {
 
 #[test]
 fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
-    use crate::migrations::v5::{any_left, MigrateToV5, ITEMS};
+    use crate::migrations::v5::{any_left, VersionUncheckedMigrateToV5, ITEMS};
     use frame_support::{
         storage::{storage_prefix, unhashed},
-        traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion},
+        traits::{GetStorageVersion, StorageVersion, UncheckedOnRuntimeUpgrade},
     };
 
     new_test_ext().execute_with(|| {
@@ -2373,11 +2373,12 @@ fn migration_v5_removes_every_marketplace_item_and_nothing_else() {
         StorageVersion::new(4).put::<VitreusDex>();
         assert!(any_left::<Test>());
 
-        MigrateToV5::<Test>::on_runtime_upgrade();
+        VersionUncheckedMigrateToV5::<Test>::on_runtime_upgrade();
 
         assert!(!any_left::<Test>());
         assert!(Pools::<Test>::contains_key(VitreusDex::canonical_pair(native(), usdc())));
-        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(5));
+        // v7 runs it, and v7 is gated on 4: the version stays where it was.
+        assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(4));
     });
 }
 
@@ -2603,6 +2604,54 @@ fn migration_v7_runs_only_on_v4_chain() {
         assert_eq!(VitreusDex::on_chain_storage_version(), StorageVersion::new(6));
         let _ = pair;
     });
+}
+
+/// v7 is gated on v4, so anything else that moves the on-chain version off 4
+/// — another versioned migration, or a hand-written version write — skips v7
+/// when a runtime lists it first, and the single-pool core's storage stays
+/// under the new core. Reads every non-test source of the crate, so a
+/// wrapper added in any file fails here.
+#[test]
+fn v7_is_only_migration_that_moves_storage_version() {
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+    // Split so that this test's own source does not match.
+    let versioned = concat!("Versioned", "Migration<");
+    let version_write = concat!(".put", "::<");
+    let test_only = [
+        "account_lifecycle_tests.rs",
+        "asset_conversion_tests.rs",
+        "core_tests.rs",
+        "fuzz.rs",
+        "mock.rs",
+        "tests.rs",
+    ];
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src];
+    let mut gates = Vec::new();
+    let mut writes = Vec::new();
+    while let Some(path) = files.pop() {
+        if path.is_dir() {
+            files.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if path.extension().is_none_or(|e| e != "rs") || test_only.contains(&name.as_str()) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (at, _) in text.match_indices(versioned) {
+            let args: Vec<String> = text[at + versioned.len()..]
+                .splitn(3, ',')
+                .take(2)
+                .map(|a| a.trim().to_owned())
+                .collect();
+            gates.push((name.clone(), args));
+        }
+        writes.extend(text.match_indices(version_write).map(|_| name.clone()));
+    }
+    assert_eq!(gates, vec![("lib.rs".to_owned(), vec!["4".to_owned(), "7".to_owned()])]);
+    assert!(writes.is_empty(), "storage version written in {writes:?}");
+    assert_eq!(VitreusDex::in_code_storage_version(), StorageVersion::new(7));
 }
 
 /// A live chain's whole `VitreusDex` storage, exported raw: tier 3's

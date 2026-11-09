@@ -2248,8 +2248,8 @@ pub mod migrations {
     /// while its pool account kept the funds, with no call left that moves
     /// them. What is dropped is logged, each pool with its id and account.
     ///
-    /// Also carried: v5's removal of the solver marketplace's items (a chain
-    /// at v4 never ran it; list this migration, not v5 as well). Kept:
+    /// Also carried: v5's removal of the solver marketplace's items, which a
+    /// chain at v4 never ran; v5 has no versioned migration of its own. Kept:
     /// `DefaultFeeRouting`, `ProtocolFeeRecipient`, and the fees owed —
     /// `ProtocolFeesUnclaimed` and `CreatorFeesUnclaimed`, whose native the
     /// fee escrow holds and the new core pays out under the same keys.
@@ -2422,7 +2422,9 @@ pub mod migrations {
             })
         }
 
-        /// Unversioned body; wrap in [`MigrateToV5`].
+        /// Unversioned, with no versioned wrapper: [`super::v7::MigrateToV7`]
+        /// runs it, and a wrapper gated on v4 that a runtime listed first
+        /// would move the version off 4 and make v7 skip.
         ///
         /// Nothing is carried over and nothing is refused: every item is
         /// cleared, whatever it holds, and each one that held anything is
@@ -2471,16 +2473,6 @@ pub mod migrations {
                 Ok(())
             }
         }
-
-        /// Removal of the marketplace's storage, gated on the pallet's
-        /// on-chain storage version.
-        pub type MigrateToV5<T> = VersionedMigration<
-            4,
-            5,
-            VersionUncheckedMigrateToV5<T>,
-            Pallet<T>,
-            <T as frame_system::Config>::DbWeight,
-        >;
     }
 
     /// Tops the fee escrow up to its ED plus every unclaimed fee, so
