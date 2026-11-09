@@ -103,7 +103,11 @@ pub type EnsureDexAccount<T> =
 /// Denominator for the fee tier, expressed in 10ths of a percent.
 pub const FEE_DENOMINATOR: u32 = 1_000;
 
-/// Minimum liquidity permanently locked on first deposit to prevent first-depositor attacks.
+/// The value a runtime binds the base pallet's `MintMinLiquidity` to, which
+/// is what applies: the base pallet locks that many LP tokens on a pool's
+/// first deposit, against first-depositor attacks, and refuses a deposit
+/// that would mint no more than that many to the depositor. This constant
+/// does not reach the base pallet on its own.
 pub const MINIMUM_LIQUIDITY: u32 = 1_000;
 
 /// Basis-point denominator for fee routing.
@@ -803,7 +807,11 @@ pub mod pallet {
         ZeroAmount,
         /// An overflow happened.
         Overflow,
-        /// Initial liquidity deposit is too small to exceed MINIMUM_LIQUIDITY.
+        /// A first deposit too small to open the pool: once the base
+        /// pallet's `MintMinLiquidity` is locked, it would mint the depositor
+        /// no more than `MintMinLiquidity`. Also a reserved-pool seeder
+        /// holding less of an asset than it seeds, by more than that asset's
+        /// minimum balance, or none of it to spend.
         InsufficientInitialLiquidity,
         /// The pair contains a reserved asset; such pools can only be created
         /// through `ReservedPoolSeeder::seed_reserved_pool_for`.
