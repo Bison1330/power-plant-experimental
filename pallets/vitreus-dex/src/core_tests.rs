@@ -720,6 +720,84 @@ fn seed_is_refused_where_it_cannot_be_what_it_promises() {
     });
 }
 
+fn seedable(asset: NativeOrAssetId, quote: NativeOrAssetId, a: u128, q: u128) -> DispatchResult {
+    <VitreusDex as PoolManager<_, _, _, _>>::ensure_seedable(asset, quote, a, q)
+}
+
+#[test]
+fn seedable_needs_more_minted_than_base_locks() {
+    new_runtime_like_ext().execute_with(|| {
+        assert_ok!(Assets::force_create(RuntimeOrigin::root(), LAUNCH_ID, ALICE, false, 1));
+        let refused = Err(Error::<Test>::InsufficientInitialLiquidity.into());
+        // isqrt(a × q) mints; the base pallet locks MINIMUM_LIQUIDITY of it
+        // and the depositor's share must be more than that.
+        assert_eq!(seedable(launch(), usdc(), 2_000, 2_000), refused);
+        assert_ok!(seedable(launch(), usdc(), 2_001, 2_001));
+        assert_eq!(seedable(launch(), usdc(), 1, 4_004_000), refused);
+        assert_ok!(seedable(launch(), usdc(), 1, 4_004_001));
+        // Shares above the locked minimum but not above twice it: no longer
+        // seedable.
+        assert_eq!(seedable(launch(), usdc(), 1_001, 1_001), refused);
+        assert_eq!(seedable(launch(), usdc(), 1_999, 1_999), refused);
+        // Each amount at least its asset's minimum balance.
+        assert_eq!(seedable(launch(), native(), UNIT, RUNTIME_ED - 1), refused);
+        assert_ok!(seedable(launch(), native(), UNIT, RUNTIME_ED));
+        assert_eq!(seedable(launch(), usdc(), 0, UNIT), refused);
+    });
+}
+
+/// For every pair of amounts around the rule's edges, the preflight and the
+/// seed agree: what `ensure_seedable` accepts seeds, and what it refuses
+/// the seed refuses with the same error. A seeder holding exactly what it
+/// seeds deposits the launch token less its minimum balance, and that
+/// deposit is what agrees.
+#[test]
+fn seedable_amounts_are_exactly_those_that_seed() {
+    let edges = [1, 2, 999, 1_000, 1_001, 1_999, 2_000, 2_001, 2_002, 4_004_000, 4_004_001, UNIT];
+    let quotes = edges
+        .iter()
+        .map(|q| (usdc(), *q))
+        .chain([RUNTIME_ED - 1, RUNTIME_ED, RUNTIME_ED + 1, UNIT].map(|q| (native(), q)));
+    let mut seeded = 0;
+    for (quote, q) in quotes {
+        for a in edges {
+            for spare in [true, false] {
+                new_runtime_like_ext().execute_with(|| {
+                    assert_ok!(VitreusDex::set_default_fee_routing(
+                        RuntimeOrigin::root(),
+                        3,
+                        10,
+                        0,
+                        0
+                    ));
+                    let escrow = seeder_with(if spare { a + 1 } else { a });
+                    let deposit = if spare { a } else { a - 1 };
+                    let asked = seedable(launch(), quote.clone(), deposit, q);
+                    let got =
+                        <VitreusDex as ReservedPoolSeeder<_, _, _, _>>::seed_reserved_pool_for(
+                            &escrow,
+                            launch(),
+                            quote.clone(),
+                            a,
+                            q,
+                            3,
+                        );
+                    assert_eq!(
+                        got.map(|o| (o.asset_seeded, o.quote_seeded)),
+                        asked.map(|()| (deposit, q)),
+                        "{a} of the token (seeder spare {spare}), {q} of {quote:?}"
+                    );
+                    if asked.is_ok() {
+                        seeded += 1;
+                    }
+                });
+            }
+        }
+    }
+    // Both sides of the rule were reached.
+    assert!(seeded > 0 && seeded < 2 * 16 * 12, "{seeded} seeded");
+}
+
 #[test]
 fn seed_whose_sweep_cannot_land_fails_loudly() {
     new_runtime_like_ext().execute_with(|| {

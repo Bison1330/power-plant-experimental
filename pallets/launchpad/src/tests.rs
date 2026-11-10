@@ -10,7 +10,7 @@ use crate::{
     Phase,
 };
 use frame_support::{assert_noop, assert_ok};
-use pallet_vitreus_dex::{AmmBase, PoolInfo, PoolManager, Pools, MINIMUM_LIQUIDITY};
+use pallet_vitreus_dex::{AmmBase, PoolInfo, PoolManager, Pools, ReservedPoolSeeder};
 use sp_core::U256;
 use sp_runtime::{traits::BadOrigin, DispatchError};
 use std::borrow::Borrow;
@@ -70,6 +70,10 @@ fn position(who: &Acc, id: LaunchId) -> Option<Position> {
         shares,
         locked_until: pallet_vitreus_dex::LiquidityLocks::<Test>::get(pair(id), who),
     })
+}
+/// The LP tokens the base pallet locks in a pool on its first deposit.
+fn locked_minimum() -> u128 {
+    <<Test as pallet_vitreus_dex::Config>::Base as AmmBase<_, _, _>>::min_liquidity()
 }
 fn lp_issuance(id: LaunchId) -> u128 {
     <Test as pallet_vitreus_dex::Config>::Base::lp_issuance(&native(), &kind(id))
@@ -863,7 +867,7 @@ fn fm06_no_creator_lp_and_position_is_permanent() {
             ),
             pallet_vitreus_dex::Error::<Test>::LockCannotBeShortened
         );
-        assert_eq!(lp_issuance(id), position(&e, id).unwrap().shares + MINIMUM_LIQUIDITY as u128);
+        assert_eq!(lp_issuance(id), position(&e, id).unwrap().shares + locked_minimum());
         assert_eq!(position(&e, id).unwrap().locked_until, Some(u64::MAX));
         System::set_block_number(u64::MAX - 1);
         assert_noop!(
@@ -1293,7 +1297,7 @@ fn fm11_seed_overflow_is_impossible() {
         let pool = pool_of(id);
         assert!(pool.reserve_a > 2_999_000_000 * UNIT);
         assert_eq!(pool.reserve_b, SEEDED_TOKENS);
-        assert!(lp_issuance(id) > u128::from(MINIMUM_LIQUIDITY));
+        assert!(lp_issuance(id) > locked_minimum());
     });
 }
 
@@ -1367,14 +1371,48 @@ fn fm11_every_complete_state_has_a_forward_path() {
     });
 }
 
+/// The lowest target `ensure_seedable` accepts for a launch, found by asking
+/// it (it only grows with the target).
+fn lowest_seedable_target(asset: NativeOrAssetId) -> u128 {
+    assert!(Launchpad::ensure_seedable(asset.clone(), 1).is_err());
+    let (mut no, mut yes) = (1u128, MinGraduationTarget::get());
+    assert_ok!(Launchpad::ensure_seedable(asset.clone(), yes));
+    while yes - no > 1 {
+        let mid = no + (yes - no) / 2;
+        if Launchpad::ensure_seedable(asset.clone(), mid).is_ok() {
+            yes = mid;
+        } else {
+            no = mid;
+        }
+    }
+    yes
+}
+
+/// What graduation deposits for a launch at `target`: the quote the curve
+/// holds at sell-out.
+fn raise_for(target: u128) -> u128 {
+    let t = curve::Terms {
+        virtual_quote: target / 3,
+        token_floor: VirtualTokenFloor::get(),
+        fee_bps: 0,
+    };
+    curve::raise_at_sellout(&t, SELLABLE).unwrap()
+}
+
 #[test]
 fn fm11_create_preflight_rejects_unseedable() {
     new_test_ext().execute_with(|| {
-        // The DEX minimum is a crate constant; the guard is exercised directly.
-        assert_noop!(Launchpad::ensure_seedable(1, 1), Error::<Test>::Unseedable);
-        assert_noop!(Launchpad::ensure_seedable(1_000, 1_000), Error::<Test>::Unseedable); // isqrt = 1000, not > 1000
-        assert_ok!(Launchpad::ensure_seedable(1_001, 1_001));
-        assert_ok!(Launchpad::ensure_seedable(MinGraduationTarget::get(), RESERVED));
+        let next = kind(NextLaunchId::<Test>::get());
+        // Asked of the DEX: the raise must be at least the native ED, and the
+        // deposit must mint more than twice the base pallet's locked minimum.
+        // Shares above the minimum but not twice it once passed here, and
+        // so did a raise below the ED; neither seeds.
+        let t = lowest_seedable_target(next.clone());
+        assert!(raise_for(t) >= ED && raise_for(t - 1) < ED, "{t}");
+        assert_noop!(Launchpad::ensure_seedable(next.clone(), t - 1), Error::<Test>::Unseedable);
+        assert_ok!(Launchpad::ensure_seedable(next.clone(), t));
+        assert_noop!(Launchpad::ensure_seedable(next.clone(), 1_001), Error::<Test>::Unseedable);
+        assert_ok!(Launchpad::ensure_seedable(next, MinGraduationTarget::get()));
         // and with in-bounds params create_launch can never trip it
         assert_ok!(Launchpad::create_launch(
             origin(ALICE),
@@ -1386,6 +1424,67 @@ fn fm11_create_preflight_rejects_unseedable() {
             None,
             None
         ));
+    });
+}
+
+/// Every target the preflight accepts graduates into a seeded pool, from the
+/// lowest one up; the one below it is refused at creation, and the seed it
+/// would have made is refused by the DEX.
+#[test]
+fn fm11_every_target_preflight_accepts_seeds_at_graduation() {
+    new_test_ext().execute_with(|| {
+        let lowest = lowest_seedable_target(kind(NextLaunchId::<Test>::get()));
+        MinGraduationTarget::set(1);
+        for t in [lowest, lowest + 1, lowest + 2, lowest + 3, 2 * lowest + 1, 3 * UNIT] {
+            set_params(t, 100, 5_000);
+            let id = create(ALICE);
+            cross(CHARLIE, id);
+            assert_eq!(state(id).phase, Phase::Graduated, "target {t}");
+            assert!(lp_issuance(id) > 0, "target {t}");
+        }
+        set_params(lowest - 1, 100, 5_000);
+        assert_noop!(
+            Launchpad::create_launch(origin(ALICE), bv(b"N"), bv(b"N"), None, 0, 0, None, None),
+            Error::<Test>::Unseedable
+        );
+        // What that launch's seed would deposit, offered by a holder of
+        // exactly the reserved tokens, as the escrow is.
+        let seed = |id: u128, target: u128| {
+            assert_ok!(Assets::force_create(RuntimeOrigin::root(), id.into(), ALICE, false, 1));
+            assert_ok!(Assets::mint(RuntimeOrigin::signed(ALICE), id.into(), BOB, RESERVED));
+            <Test as crate::Config>::Dex::seed_reserved_pool_for(
+                &BOB,
+                NativeOrAssetId::WithId(id),
+                native(),
+                RESERVED,
+                raise_for(target),
+                3,
+            )
+        };
+        assert_eq!(
+            seed(ASSET_BASE + 1_000, lowest - 1).map(|_| ()),
+            Err(dex_err(pallet_vitreus_dex::Error::InsufficientInitialLiquidity))
+        );
+        assert_ok!(seed(ASSET_BASE + 1_001, lowest));
+    });
+}
+
+/// The preflight judges the token the seed deposits: the reserved
+/// allocation less the unit the escrow keeps. With one reserved unit the
+/// seed has nothing to deposit; with two it deposits one, and seeds.
+#[test]
+fn fm11_preflight_judges_reserved_less_unit_escrow_keeps() {
+    new_test_ext().execute_with(|| {
+        TotalSupply::set(SELLABLE + 1);
+        assert_noop!(
+            Launchpad::create_launch(origin(ALICE), bv(b"N"), bv(b"N"), None, 0, 0, None, None),
+            Error::<Test>::Unseedable
+        );
+        TotalSupply::set(SELLABLE + 2);
+        let id = create(ALICE);
+        cross(CHARLIE, id);
+        assert_eq!(state(id).phase, Phase::Graduated);
+        assert_eq!(tok(id, pool_account(id)), 1);
     });
 }
 

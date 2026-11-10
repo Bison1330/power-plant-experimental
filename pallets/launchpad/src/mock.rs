@@ -266,11 +266,13 @@ impl pallet_multisig::Config for Test {
 
 parameter_types! {
     pub const LaunchpadPalletId: PalletId = PalletId(*b"vtrs/lpd");
-    pub const TotalSupply: u128 = 1_000_000_000 * UNIT;
+    // A static, so a test can leave the seed a reserved allocation of a unit or two.
+    pub static TotalSupply: u128 = 1_000_000_000 * UNIT;
     pub const Sellable: u128 = 800_000_000 * UNIT;
     pub const VirtualTokenFloor: u128 = 266_666_667 * UNIT;
     pub const LaunchAssetBase: u128 = ASSET_BASE;
-    pub const MinGraduationTarget: u128 = 3 * UNIT;
+    // A static, so a test can launch at the lowest target the seed takes.
+    pub static MinGraduationTarget: u128 = 3 * UNIT;
     pub const MaxGraduationTarget: u128 = 3_000_000_000 * UNIT;
     // 2·ED + AssetDeposit + MetadataDepositBase + 2·StringLimit·PerByte +
     // AssetAccountDeposit (the pool address's launch-token account)

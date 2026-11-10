@@ -370,6 +370,21 @@ pub trait PoolManager<AccountId, AssetKind, Balance, BlockNumber> {
     /// pool (`swap_for` does not count), for the treasury's dormancy rule;
     /// `None` if the pool does not exist.
     fn last_swap_block(asset: AssetKind) -> Option<BlockNumber>;
+
+    /// Whether a first deposit of exactly `amount_a` of `asset_a` and
+    /// `amount_b` of `asset_b` would open the pair's pool, by the rule the
+    /// seed and every first deposit are held to: each amount at least its
+    /// asset's minimum balance, and more LP tokens minted to the depositor
+    /// than the base pallet locks. `InsufficientInitialLiquidity` if not.
+    /// Judge what will be deposited: a seeder holding no more of an asset
+    /// than it seeds deposits that amount less the asset's minimum balance
+    /// ([`ReservedPoolSeeder::seed_reserved_pool_for`]).
+    fn ensure_seedable(
+        asset_a: AssetKind,
+        asset_b: AssetKind,
+        amount_a: Balance,
+        amount_b: Balance,
+    ) -> DispatchResult;
 }
 
 /// The one swap the solver marketplace needs to settle an intent, and
@@ -812,7 +827,8 @@ pub mod pallet {
         Overflow,
         /// A first deposit too small to open the pool: once the base
         /// pallet's `MintMinLiquidity` is locked, it would mint the depositor
-        /// no more than `MintMinLiquidity`. Also a reserved-pool seeder
+        /// no more than `MintMinLiquidity`, or a seed of an amount below its
+        /// asset's minimum balance. Also a reserved-pool seeder
         /// holding less of an asset than it seeds, by more than that asset's
         /// minimum balance, or none of it to spend.
         InsufficientInitialLiquidity,
@@ -1450,6 +1466,42 @@ pub mod pallet {
             Ok(())
         }
 
+        /// The base pallet's refusal of a first deposit, as ours: it mints
+        /// `isqrt(amount_a × amount_b)` LP tokens, locks its minimum of them
+        /// in the pool account, and refuses unless the depositor's share,
+        /// what is left, is more than that minimum.
+        pub(crate) fn ensure_first_deposit_mints(
+            amount_a: T::Balance,
+            amount_b: T::Balance,
+        ) -> DispatchResult {
+            let min = T::Base::min_liquidity();
+            let wide = T::HigherPrecisionBalance::from;
+            let root: T::Balance = wide(amount_a)
+                .checked_mul(&wide(amount_b))
+                .ok_or(Error::<T>::Overflow)?
+                .integer_sqrt()
+                .try_into()
+                .map_err(|_| Error::<T>::Overflow)?;
+            ensure!(root.saturating_sub(min) > min, Error::<T>::InsufficientInitialLiquidity);
+            Ok(())
+        }
+
+        /// Body of [`PoolManager::ensure_seedable`]: the base pallet also
+        /// refuses a first deposit below either asset's minimum balance.
+        pub fn do_ensure_seedable(
+            asset_a: &T::AssetKind,
+            asset_b: &T::AssetKind,
+            amount_a: T::Balance,
+            amount_b: T::Balance,
+        ) -> DispatchResult {
+            ensure!(
+                amount_a >= T::Assets::minimum_balance(asset_a.clone())
+                    && amount_b >= T::Assets::minimum_balance(asset_b.clone()),
+                Error::<T>::InsufficientInitialLiquidity
+            );
+            Self::ensure_first_deposit_mints(amount_a, amount_b)
+        }
+
         /// The base pool for `pair`, created if it does not exist yet at the
         /// LP fee `pool` fixes, with `creator` paying the deposits that open
         /// its accounts. The base pallet's calls are not in the runtime, so
@@ -1584,6 +1636,8 @@ pub mod pallet {
             };
             let asset_in = spare(&asset, amount_asset)?;
             let quote_in = spare(&quote, amount_quote)?;
+            // What the launchpad's preflight asked, on what is deposited.
+            Self::do_ensure_seedable(&asset, &quote, asset_in, quote_in)?;
             let (quote_seeded, asset_seeded, shares) = T::Base::add_liquidity(
                 who,
                 quote.clone(),
@@ -1712,26 +1766,13 @@ pub mod pallet {
             // deposit minting no more than its locked minimum: a first deposit
             // that small is too small to open the pool, a later one too small
             // to record.
-            let min = T::Base::min_liquidity();
             match T::Base::reserves(&asset_a, &asset_b) {
-                None => {
-                    let wide = T::HigherPrecisionBalance::from;
-                    let root: T::Balance = wide(take_a)
-                        .checked_mul(&wide(take_b))
-                        .ok_or(Error::<T>::Overflow)?
-                        .integer_sqrt()
-                        .try_into()
-                        .map_err(|_| Error::<T>::Overflow)?;
-                    ensure!(
-                        root.saturating_sub(min) > min,
-                        Error::<T>::InsufficientInitialLiquidity
-                    );
-                },
+                None => Self::ensure_first_deposit_mints(take_a, take_b)?,
                 Some((reserve_a, reserve_b)) => {
                     let issuance = T::Base::lp_issuance(&asset_a, &asset_b);
                     let minted = Self::mul_div_floor(take_a, issuance, reserve_a)?
                         .min(Self::mul_div_floor(take_b, issuance, reserve_b)?);
-                    ensure!(minted > min, Error::<T>::ZeroAmount);
+                    ensure!(minted > T::Base::min_liquidity(), Error::<T>::ZeroAmount);
                 },
             }
 
@@ -2189,6 +2230,15 @@ impl<T: Config> PoolManager<T::AccountId, T::AssetKind, T::Balance, BlockNumberF
 {
     fn pool_exists(asset_a: T::AssetKind, asset_b: T::AssetKind) -> bool {
         Self::pool_exists(asset_a, asset_b)
+    }
+
+    fn ensure_seedable(
+        asset_a: T::AssetKind,
+        asset_b: T::AssetKind,
+        amount_a: T::Balance,
+        amount_b: T::Balance,
+    ) -> DispatchResult {
+        Self::do_ensure_seedable(&asset_a, &asset_b, amount_a, amount_b)
     }
 
     fn create_pool(asset_a: T::AssetKind, asset_b: T::AssetKind, fee_tier: u32) -> DispatchResult {
