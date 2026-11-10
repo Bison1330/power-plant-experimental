@@ -7,7 +7,10 @@ use crate::{
     IntentSwap, LastSwapBlock, LiquidityLocks, PoolInfo, PoolManager, Pools, ProtocolFeesUnclaimed,
     ReservedPoolSeeder, SeedOutcome, MINIMUM_LIQUIDITY,
 };
-use frame_support::{assert_noop, assert_ok, traits::fungibles::Inspect};
+use frame_support::{
+    assert_noop, assert_ok,
+    traits::{fungibles::Inspect, Hooks},
+};
 use sp_runtime::{traits::BadOrigin, DispatchError, DispatchResult, Permill};
 
 fn native() -> NativeOrAssetId {
@@ -167,6 +170,41 @@ fn lp_fee_keeps_what_tier_leaves_lps() {
             assert!(lhs >= rhs && lhs - rhs < 10_000, "tier {tier} routed {routed}: {p}");
         }
     }
+}
+
+fn integrity_test() {
+    <VitreusDex as Hooks<u64>>::integrity_test()
+}
+
+#[test]
+fn integrity_test_passes_base_fees_the_dex_accounts_for() {
+    // The highest tier's LP fee, nothing routed, is 1 %.
+    MaxSwapFee::set(VitreusDex::lp_fee(10, &FeeRouting::default()));
+    assert_eq!(MaxSwapFee::get(), Permill::from_percent(1));
+    integrity_test();
+}
+
+#[test]
+#[should_panic(expected = "PoolSetupFee must be zero")]
+fn integrity_test_refuses_pool_setup_fee() {
+    PoolSetupFee::set(1);
+    integrity_test();
+}
+
+#[test]
+#[should_panic(expected = "LiquidityWithdrawalFee must be zero")]
+fn integrity_test_refuses_liquidity_withdrawal_fee() {
+    LiquidityWithdrawalFee::set(Permill::from_parts(1));
+    integrity_test();
+}
+
+#[test]
+#[should_panic(expected = "MaxSwapFee must cover the LP fee of every fee tier")]
+fn integrity_test_refuses_max_swap_fee_below_highest_tier_lp_fee() {
+    MaxSwapFee::set(Permill::from_parts(
+        VitreusDex::lp_fee(10, &FeeRouting::default()).deconstruct() - 1,
+    ));
+    integrity_test();
 }
 
 #[test]

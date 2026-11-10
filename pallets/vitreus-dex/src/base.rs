@@ -68,6 +68,15 @@ where
     /// every deposit must mint more than.
     fn min_liquidity() -> Balance;
 
+    /// What the base pallet charges to create a pool, in its setup-fee asset.
+    fn pool_setup_fee() -> Balance;
+
+    /// The share of every withdrawal's LP tokens the base pallet keeps.
+    fn liquidity_withdrawal_fee() -> Permill;
+
+    /// The highest LP fee the base pallet creates a pool with.
+    fn max_swap_fee() -> Permill;
+
     /// Open `who`'s LP-token account if it has none: deposit-backed, which
     /// takes no consumer reference. The base pallet mints into an unopened
     /// account on a consumer reference, so the DEX opens it before every add.
@@ -255,6 +264,18 @@ where
 
     fn min_liquidity() -> R::Balance {
         R::MintMinLiquidity::get()
+    }
+
+    fn pool_setup_fee() -> R::Balance {
+        R::PoolSetupFee::get()
+    }
+
+    fn liquidity_withdrawal_fee() -> Permill {
+        R::LiquidityWithdrawalFee::get()
+    }
+
+    fn max_swap_fee() -> Permill {
+        R::MaxSwapFee::get()
     }
 
     fn open_lp_account(

@@ -170,8 +170,11 @@ macro_rules! impl_base_pallet_for_mock {
             pub const AssetConversionPalletId: frame_support::PalletId =
                 frame_support::PalletId(*b"vtrs/amm");
             pub const BaseLpFee: sp_runtime::Permill = sp_runtime::Permill::from_parts(3_000);
-            pub const MaxSwapFee: sp_runtime::Permill = sp_runtime::Permill::from_percent(1);
-            pub const LiquidityWithdrawalFee: sp_runtime::Permill = sp_runtime::Permill::zero();
+            // Statics, so a test can break what the DEX's `integrity_test`
+            // requires of them.
+            pub static MaxSwapFee: sp_runtime::Permill = sp_runtime::Permill::from_percent(1);
+            pub static LiquidityWithdrawalFee: sp_runtime::Permill = sp_runtime::Permill::zero();
+            pub static PoolSetupFee: u128 = 0;
         }
 
         pub type PoolIdToAccountId = pallet_asset_conversion::AccountIdConverter<
@@ -201,7 +204,7 @@ macro_rules! impl_base_pallet_for_mock {
             type LPFee = BaseLpFee;
             type AdminOrigin = $crate::EnsureDexAccount<$runtime>;
             type MaxSwapFee = MaxSwapFee;
-            type PoolSetupFee = frame_support::traits::ConstU128<0>;
+            type PoolSetupFee = PoolSetupFee;
             type PoolSetupFeeAsset = $native;
             type PoolSetupFeeTarget = ();
             type LiquidityWithdrawalFee = LiquidityWithdrawalFee;

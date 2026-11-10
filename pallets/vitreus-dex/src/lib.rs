@@ -103,6 +103,9 @@ pub type EnsureDexAccount<T> =
 /// Denominator for the fee tier, expressed in 10ths of a percent.
 pub const FEE_DENOMINATOR: u32 = 1_000;
 
+/// The whitelisted fee tiers, in 10ths of a percent.
+pub const FEE_TIERS: [u32; 3] = [1, 3, 10];
+
 /// The value a runtime binds the base pallet's `MintMinLiquidity` to, which
 /// is what applies: the base pallet locks that many LP tokens on a pool's
 /// first deposit, against first-depositor attacks, and refuses a deposit
@@ -857,6 +860,31 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        /// The base pallet's fees this pallet does not account for, and the
+        /// LP fees it creates pools with.
+        fn integrity_test() {
+            // A seed pays the setup fee from the launch escrow: out of the ED
+            // the escrow set aside for the pool, then the creator's unclaimed
+            // fees.
+            assert!(
+                T::Base::pool_setup_fee().is_zero(),
+                "the base pallet's PoolSetupFee must be zero: a seed would pay it out of the launch escrow"
+            );
+            // The DEX prices an exit, and checks its guards, on what the LP
+            // tokens redeem for with no fee taken.
+            assert!(
+                T::Base::liquidity_withdrawal_fee().is_zero(),
+                "the base pallet's LiquidityWithdrawalFee must be zero: the DEX prices an exit without it"
+            );
+            // A pool's LP fee is highest with nothing routed: the whole tier.
+            for tier in FEE_TIERS {
+                assert!(
+                    Self::lp_fee(tier, &FeeRouting::default()) <= T::Base::max_swap_fee(),
+                    "the base pallet's MaxSwapFee must cover the LP fee of every fee tier"
+                );
+            }
+        }
+
         #[cfg(feature = "try-runtime")]
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
             Self::do_try_state()
@@ -1386,7 +1414,7 @@ pub mod pallet {
 
         /// Finding 4: whitelist allowed fee tiers (0.1%, 0.3%, 1.0%).
         fn ensure_valid_fee_tier(fee_tier: u32) -> DispatchResult {
-            ensure!(fee_tier == 1 || fee_tier == 3 || fee_tier == 10, Error::<T>::InvalidFeeTier);
+            ensure!(FEE_TIERS.contains(&fee_tier), Error::<T>::InvalidFeeTier);
             Ok(())
         }
 
