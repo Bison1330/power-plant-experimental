@@ -30,9 +30,15 @@ pallets/BENCHMARKING.md          # how weights are measured, inside a consuming 
 
 Each pallet carries its tests, its measured `weights.rs`, its benchmarks (which run inside a
 consuming runtime — `pallets/BENCHMARKING.md` here is the runbook, and `.maintain/` the weight
-template it uses), and its
-storage migrations as `VersionedMigration`s, so a crate at any commit is right for a fresh
-chain and for one that ran an earlier version.
+template it uses), and its storage migrations. Those that change storage (the DEX's v7, the
+launchpad's and the launch treasury's v1) are `VersionedMigration`s, which run once, from the
+storage version they name. Those that fund an account (the DEX's `EndowFeeEscrow`, the launch
+treasury's `FundVault`, the marketplace's `EndowEscrows`) are unversioned: they run on every
+upgrade, and what the account already holds, or a flag, makes a second run harmless. A pallet
+added by an upgrade is stamped with its current version before any migration runs, so a
+versioned one would skip there. A crate is right for a fresh chain and for one at a version
+its migrations start from, not for every earlier version: the DEX's v7 runs only from 4, so a
+chain at 5 or 6 skips it and keeps the old core's pool storage.
 
 ## Consuming from power-plant
 
